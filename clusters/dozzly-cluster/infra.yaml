@@ -8,9 +8,10 @@ spec:
   timeout: 5m
   retryInterval: 30s
   prune: true
+  wait: true
   sourceRef:
     kind: GitRepository
-    name: dozzly-cluster
+    name: flux-system
   path: ./infra
   wait: true
   healthChecks:
