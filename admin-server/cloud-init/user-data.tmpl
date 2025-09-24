@@ -35,7 +35,6 @@ users:
     system: true
     shell: /usr/sbin/nologin
     home: /srv/matchbox
-    groups: []
 
 # --- 2) Packages we’ll need ---
 package_update: true
@@ -306,7 +305,7 @@ write_files:
       MINIO_BUCKET_VMS="vm-backups"
 
       # GitOps repo (Flux will read from this)
-      GITOPS_DIR="/srv/git/dozzly-cluster-gitops"
+      GITOPS_DIR="/srv/git/dozzly-network-home-cluster"
       GIT_REMOTE="git@github.com:jackchild/dozzly-network-home-cluster.git"
       GIT_BRANCH="main"
       ADMIN_GIT_NAME="dozzly"
@@ -730,14 +729,28 @@ write_files:
     owner: root:root
     content: |
       #!/usr/bin/env bash
-      set -euo pipefail
+      set -Eeuo pipefail
+      export DEBIAN_FRONTEND=noninteractive
+
+      # pretty trace on error
+      trap 'rc=$?; echo "[ERROR] line $LINENO: ${BASH_COMMAND} (exit $rc)"; exit $rc' ERR
+
+      run() {
+        echo
+        echo "=== $(date -Is) :: $*"
+        echo
+        timeout --foreground "${TIMEOUT:-600s}" "$@"
+      }
+
       echo "[apply] sourcing /etc/cloud/admin.env"
       source /etc/cloud/admin.env
-      /usr/local/bin/install-flux-cli.sh
-      /usr/local/bin/minio-setup.sh
-      /usr/local/bin/gitops-skeleton.sh
-      /usr/local/bin/flux-generate-key.sh
-      /usr/local/bin/talos-generate-configs.sh
+
+      run /usr/local/bin/install-flux-cli.sh
+      run /usr/local/bin/minio-setup.sh
+      run /usr/local/bin/gitops-skeleton.sh
+      run /usr/local/bin/flux-generate-key.sh
+      run /usr/local/bin/talos-generate-configs.sh
+
       echo "[apply] done."
 
 # --- 4) Commands (ordered; binaries & dirs before starting services) ---
@@ -885,7 +898,7 @@ final_message: |
    1. Edit /etc/cloud/admin.env to set cluster name, Git repo, and IPs.
    2. sudo chown -R jdoswell:jdoswell /srv/
    3. Generate a Flux SSH key (if not already):
-        ssh-keygen -t ed25519 -C "flux-<cluster-name>" -N "" -f ~/.ssh/flux-bootstrap
+        ssh-keygen -t ed25519 -C "flux-dozzly-cluster" -N "" -f ~/.ssh/flux-bootstrap
         cat ~/.ssh/flux-bootstrap.pub
       → Add this key as a Deploy key (with write access) on GitHub repo jackchild/dozzly-network-home-cluster.
    4. Allow the VM to use that key for GitHub:
@@ -894,10 +907,9 @@ final_message: |
    5. Test GitHub SSH auth:
         ssh -T git@github.com
    6. Initialize/push GitOps skeleton:
-        cd /srv/git/dozzly-cluster-gitops
-        git remote add origin git@github.com:dozzly/dozzly-network-home-cluster.git || git remote set-url origin git@github.com:dozzly/dozzly-network-home-cluster.git
-        git branch -M main
-        git push -u origin main
+        mkdir -p /srv/git/
+        cd /srv/git/
+        git clone https://github.com/dozzly/dozzly-network-home-cluster.git
    7. When first NUC is up and Talos cluster is bootstrapped:
         flux bootstrap github \
           --owner dozzly \
