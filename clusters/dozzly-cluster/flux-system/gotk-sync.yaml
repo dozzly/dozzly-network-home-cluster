@@ -5,7 +5,7 @@ metadata:
   namespace: flux-system
 spec:
   interval: 1m
-  url: https://github.com/dozzly/dozzly-network-home-cluster
+  url: ssh://git@github.com/dozzly/dozzly-network-home-cluster
   ref:
     branch: main
   ignore: |
