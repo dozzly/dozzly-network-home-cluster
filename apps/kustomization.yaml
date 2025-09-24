@@ -6,6 +6,7 @@ resources:
   - plex
   - uptime-kuma
   - adguard
+  - influxdb
 patches:
   # optional: apply shared patches in ./apps/patches/
   - path: patches/common-env.yaml
