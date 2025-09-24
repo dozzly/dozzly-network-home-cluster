@@ -10,7 +10,7 @@ spec:
   prune: true
   sourceRef:
     kind: GitRepository
-    name: dozzly-cluster
+    name: flux-system
   path: ./apps
   wait: true
   dependsOn:
