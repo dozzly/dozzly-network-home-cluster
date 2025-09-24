@@ -8,3 +8,6 @@ resources:
   - ingress.yaml
   - nfs-media-pv.yaml
   - nfs-media-pvc.yaml
+# Optional per-app patches
+# patchesStrategicMerge:
+#   - patch.yaml

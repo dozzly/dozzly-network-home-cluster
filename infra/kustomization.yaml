@@ -6,3 +6,4 @@ resources:
   - longhorn/
   - ingress-traefik/
   - intel-device-plugins/
+  - kyverno/

@@ -1,6 +1,10 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
-  - uptime-kuma/
-  - plex/
+  - whoami/
   - homebridge/
+  - plex/
+  - uptime-kuma/
+patches:
+  # optional: apply shared patches in ./apps/patches/
+  - path: patches/common-env.yaml

@@ -5,11 +5,14 @@ metadata:
   namespace: flux-system
 spec:
   interval: 5m
-  path: ./apps
+  timeout: 5m
+  retryInterval: 30s
   prune: true
   sourceRef:
     kind: GitRepository
-    name: flux-system
+    name: dozzly-cluster
+  path: ./apps
+  wait: true
   dependsOn:
     - name: infra
     - name: policies
