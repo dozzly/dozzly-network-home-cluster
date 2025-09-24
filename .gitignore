@@ -49,6 +49,7 @@ Thumbs.db
 seed.iso
 user-data
 meta-data
+network-config
 admin-server.qcow2
 edk2-vars.aarch64.fd
 *.log
