@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: plex-media-pv
+spec:
+  capacity: { storage: 10Ti }             # logical; NFS ignores size
+  accessModes: [ ReadOnlyMany ]
+  nfs:
+    server: 192.168.1.200                  # <-- your NAS IP
+    path: /export/media                    # <-- your share path
+  mountOptions:
+    - nfsvers=4.1
+    - rsize=1048576
+    - wsize=1048576
+  persistentVolumeReclaimPolicy: Retain

@@ -1,0 +1,29 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: homebridge
+  namespace: homebridge
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: homebridge } }
+  template:
+    metadata: { labels: { app: homebridge } }
+    spec:
+      # run only on AMD64 (NUCs)
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      containers:
+      - name: homebridge
+        image: homebridge/homebridge:2025-09-21   # ⚠️ set a real, non-latest tag
+        env:
+        - name: TZ
+          value: "Europe/London"
+        ports:
+        - containerPort: 8581
+        volumeMounts:
+        - name: config
+          mountPath: /homebridge
+      volumes:
+      - name: config
+        persistentVolumeClaim:
+          claimName: homebridge-config

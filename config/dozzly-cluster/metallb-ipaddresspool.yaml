@@ -1,0 +1,16 @@
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: dozzly-cluster-pool
+  namespace: metallb-system
+spec:
+  addresses:
+  - 192.168.150-192.168.154
+---
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: dozzly-cluster-adv
+  namespace: metallb-system
+spec:
+  ipAddressPools: [ homelab-pool ]

@@ -1,0 +1,918 @@
+#cloud-config
+manage_etc_hosts: true
+ssh_pwauth: false
+
+# --- 0) Early: prepare dnsmasq iface binding (no duplicates later) ---
+bootcmd:
+  - [ bash, -lc, 'set -euo pipefail;
+      # Block auto-start of services during package install
+      cat >/usr/sbin/policy-rc.d <<EOF
+      #!/bin/sh
+      # 101 = "action not allowed"
+      exit 101
+      EOF
+      chmod 0755 /usr/sbin/policy-rc.d;
+
+      # Prepare dnsmasq interface file early to avoid races
+      mkdir -p /etc/dnsmasq.d;
+      IFACE="$(ip -o -4 route show to default | awk "{print \$5}")";
+      printf "%s\n" "bind-interfaces" "interface=${IFACE}" "except-interface=lo" > /etc/dnsmasq.d/00-iface.conf' ]
+
+
+# --- 1) Users ---
+users:
+  - name: ${admin_user}
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    lock_passwd: false
+    # Optional console password (hash must be SHA-512: starts with $6$…)
+    passwd: ${ssh_password_hash}
+    ssh_authorized_keys:
+      - ${ssh_pubkey}
+
+  # System account for matchbox
+  - name: matchbox
+    system: true
+    shell: /usr/sbin/nologin
+    home: /srv/matchbox
+    groups: []
+
+# --- 2) Packages we’ll need ---
+package_update: true
+package_upgrade: true
+packages:
+  - git
+  - curl
+  - jq
+  - dnsmasq
+  - tftpd-hpa
+  - ca-certificates
+  - wget
+  - unzip
+  - apt-transport-https
+  - lsb-release
+  - gnupg
+  - ufw
+  - ca-certificates
+
+# --- 3) Files (scripts, units, configs) ---
+write_files:
+
+  - path: /etc/systemd/system/systemd-networkd-wait-online.service.d/override.conf
+    permissions: "0644"
+    owner: "root:root"
+    content: |
+      [Service]
+      ExecStart=
+      ExecStart=/lib/systemd/systemd-networkd-wait-online --any --timeout=15
+
+  # Admin bootstrap (logs to /var/log/admin-setup.log)
+  - path: /usr/local/sbin/admin-setup.sh
+    permissions: "0755"
+    owner: "root:root"
+    content: |
+      #!/usr/bin/env bash
+      set -u
+      exec > >(tee -a /var/log/admin-setup.log) 2>&1
+      echo "== $(date -Is) start =="
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update || true
+      apt-get install -y -o Dpkg::Options::="--force-confold" caddy || true
+      systemctl enable --now caddy || true
+      echo "== $(date -Is) done =="
+
+  # Script that (re)writes the iface binding file
+  - path: /usr/local/sbin/gen-dnsmasq-iface.sh
+    permissions: "0755"
+    owner: "root:root"
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+      IFACE="$(ip -o -4 route show to default | awk '{print $5}')"
+      [ -n "${IFACE:-}" ] || { echo "No default-route iface found"; exit 1; }
+      mkdir -p /etc/dnsmasq.d
+      {
+        echo "bind-interfaces"
+        echo "interface=${IFACE}"
+        echo "except-interface=lo"
+      } > /etc/dnsmasq.d/00-iface.conf
+
+  # Run the generator before dnsmasq
+  - path: /etc/systemd/system/dnsmasq-iface.service
+    permissions: "0644"
+    owner: "root:root"
+    content: |
+      [Unit]
+      Description=Generate dnsmasq interface configuration
+      After=network-pre.target
+      Wants=network-pre.target
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/sbin/gen-dnsmasq-iface.sh
+      RemainAfterExit=yes
+
+      [Install]
+      WantedBy=multi-user.target
+
+  # dnsmasq: wait until iface file exists and network is online
+  - path: /etc/systemd/system/dnsmasq.service.d/10-cloudinit.conf
+    permissions: "0644"
+    owner: "root:root"
+    content: |
+      [Unit]
+      After=network-online.target dnsmasq-iface.service
+      Wants=network-online.target dnsmasq-iface.service
+
+      [Service]
+      # Optional: wait until the iface has IPv4
+      ExecStartPre=/bin/sh -c 'IFACE=$(sed -n "s/^interface=//p" /etc/dnsmasq.d/00-iface.conf); \
+        for i in $(seq 1 30); do ip -4 addr show dev "$IFACE" | grep -q "inet " && exit 0; sleep 1; done; \
+        echo "Interface $IFACE has no IPv4 addr; refusing to start dnsmasq" >&2; exit 1'
+
+  # setup tftpd-hpa
+  - path: /etc/default/tftpd-hpa
+    permissions: "0644"
+    owner: "root:root"
+    content: |
+      TFTP_USERNAME="tftp"
+      TFTP_DIRECTORY="/var/lib/tftpboot"
+      TFTP_ADDRESS=":69"
+      TFTP_OPTIONS="--secure --create"
+
+  - path: /usr/local/sbin/debug-pxe.sh
+    permissions: "0755"
+    owner: "root:root"
+    content: |
+      #!/usr/bin/env bash
+      set -e
+      echo "== networkd-wait-online =="; systemctl status --no-pager systemd-networkd-wait-online || true
+      echo "== iface conf =="; cat /etc/dnsmasq.d/00-iface.conf || true
+      echo "== dnsmasq test =="; dnsmasq --test || true
+      echo "== dnsmasq logs =="; journalctl -u dnsmasq -b --no-pager | tail -n 80
+      echo "== matchbox logs =="; journalctl -u matchbox -b --no-pager | tail -n 120
+
+  # dnsmasq minimal ProxyDHCP config (NO bind-interfaces here; we set it via 00-iface.conf)
+  - path: /etc/dnsmasq.d/pxe.conf
+    permissions: "0644"
+    owner: "root:root"
+    content: |-
+      # ProxyDHCP only: do not run a DNS server (avoid port 53 conflicts)
+      port=0
+
+      # Tag clients by architecture (DHCP option 93)
+      dhcp-match=set:bios,option:client-arch,0
+      dhcp-match=set:efi32,option:client-arch,6
+      dhcp-match=set:efi64,option:client-arch,7
+      dhcp-match=set:efi64http,option:client-arch,9
+      dhcp-match=set:efiarm32,option:client-arch,10
+      dhcp-match=set:efiarm64,option:client-arch,11
+
+      # Detect iPXE (user-class option 77)
+      dhcp-userclass=set:ipxe,iPXE
+
+      # If already running iPXE → chain to HTTP boot script
+      dhcp-boot=net:ipxe,http://${admin_server_ip}:8080/boot.ipxe
+
+      # Otherwise serve the right binary depending on firmware/arch
+      dhcp-boot=tag:bios,undionly.kpxe,,${admin_server_ip}
+      dhcp-boot=tag:efi64,ipxe.efi,,${admin_server_ip}
+      dhcp-boot=tag:efi64http,ipxe.efi,,${admin_server_ip}
+      dhcp-boot=tag:efiarm64,snponly.efi,,${admin_server_ip}
+
+      # Proxy range (we don’t assign leases)
+      dhcp-range=192.168.1.0,proxy
+
+      # DHCP logs
+      log-dhcp
+
+  # Simple iPXE script (example: Talos)
+  - path: /srv/matchbox/pxe/talos.ipxe
+    permissions: "0644"
+    owner: "root:root"
+    content: |
+      #!ipxe
+      set base-url http://${admin_server_ip}/talos
+      kernel ${base-url}/vmlinuz-initrd
+      initrd ${base-url}/initramfs.img
+      imgargs vmlinuz-initrd talos.config=http://${admin_server_ip}/configs/${net0/mac}.yaml
+      boot
+
+  # Matchbox systemd unit
+  - path: /etc/systemd/system/matchbox.service
+    permissions: "0644"
+    owner: "root:root"
+    content: |
+      [Unit]
+      Description=Matchbox PXE profile server
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      User=matchbox
+      Group=matchbox
+      WorkingDirectory=/srv/matchbox
+      ExecStartPre=/usr/bin/test -x /usr/local/bin/matchbox
+      ExecStartPre=/usr/bin/test -d /srv/matchbox
+      ExecStartPre=/usr/bin/test -d /srv/matchbox/assets
+      ExecStart=/usr/local/bin/matchbox \
+        -address=0.0.0.0:8080 \
+        -rpc-address=0.0.0.0:8081 \
+        -data-path=/srv/matchbox \
+        -assets-path=/srv/matchbox/assets \
+        -log-level=debug -insecure
+      Restart=on-failure
+      RestartSec=2s
+      StandardOutput=journal
+      StandardError=journal
+
+      [Install]
+      WantedBy=multi-user.target
+
+  # Caddyfile to serve static assets
+  - path: /etc/caddy/Caddyfile
+    permissions: "0644"
+    owner: "root:root"
+    content: |
+      :80 {
+        root * /srv/matchbox
+        file_server browse
+      }
+
+  # Krew installer (parameterized for ${admin_user})
+  - path: /usr/local/bin/krew-install.sh
+    permissions: "0755"
+    owner: "root:root"
+    content: |
+      #!/usr/bin/env bash
+      set -euxo pipefail
+      id -u "${admin_user}" >/dev/null 2>&1 || useradd -m -s /bin/bash "${admin_user}"
+      sudo -u "${admin_user}" bash -lc '
+        set -euo pipefail
+        TMP="$(mktemp -d)"
+        cd "$TMP"
+        OS="$(uname | tr "[:upper:]" "[:lower:]")"
+        ARCH="$(uname -m | sed -e "s/x86_64/amd64/" -e "s/aarch64/arm64/")"
+        curl -fsSLO "https://github.com/kubernetes-sigs/krew/releases/latest/download/krew-${OS}_${ARCH}.tar.gz"
+        tar --warning=no-unknown-keyword -xzf "krew-${OS}_${ARCH}.tar.gz" 2>/dev/null || tar -xzf "krew-${OS}_${ARCH}.tar.gz"
+        "./krew-${OS}_${ARCH}" install krew
+        grep -q ".krew/bin" ~/.bashrc || echo "export PATH=\$PATH:\$HOME/.krew/bin" >> ~/.bashrc
+        export PATH="$HOME/.krew/bin:$PATH"
+        kubectl krew install ctx ns df-pv neat view-secret node-shell
+        kubectl krew upgrade
+      '
+
+  # Helm installer
+  - path: /usr/local/bin/helm-install.sh
+    permissions: "0755"
+    owner: "root:root"
+    content: |
+      #!/usr/bin/env bash
+      set -euxo pipefail
+      curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+  # -------- editable config (fill in later; safe defaults) --------
+  - path: /etc/cloud/admin.env
+    permissions: "0644"
+    owner: root:root
+    content: |
+      # ===== Admin VM config (fill as you learn details) =====
+      # External backup disk
+      BACKUP_UUID=""            # e.g. output of: blkid
+      BACKUP_FSTYPE="ext4"      # ext4/xfs/btrfs
+      BACKUP_MOUNT="/mnt/backup"
+
+      # /etc/cloud/admin.env (append these)
+      CLUSTER_NAME="dozzly-cluster"
+      CLUSTER_DOMAIN="downhill.dozzly.network"
+
+      # VIPs / host IPs
+      VIP_INGRESS_IP="192.168.150"
+      VIP_API_IP="192.168.151"
+      ADMIN_VM_IP="192.168.152"
+      NUC1_IP="192.168.153"
+      NUC2_IP="192.168.154"
+      
+      # Where to stash Talos outputs
+      TALOS_OUT_DIR="/srv/talos"
+
+      # MinIO creds (change later/rotate as needed)
+      MINIO_ROOT_USER="minioadmin"
+      MINIO_ROOT_PASSWORD="change-me-please"
+      MINIO_HOSTNAME="admin-server.lan"
+      MINIO_PORT="9000"
+      MINIO_CONSOLE_PORT="9001"
+      MINIO_BUCKET_LONGHORN="longhorn-backups"
+      MINIO_BUCKET_VMS="vm-backups"
+
+      # GitOps repo (Flux will read from this)
+      GITOPS_DIR="/srv/git/dozzly-cluster-gitops"
+      GIT_REMOTE="git@github.com:jackchild/dozzly-network-home-cluster.git"
+      GIT_BRANCH="main"
+      ADMIN_GIT_NAME="dozzly"
+      ADMIN_GIT_EMAIL="jack.child@gmail.com"
+
+      # Local admin user who should own SSH keys
+      ADMIN_USER="${USER}"
+
+  # -------- flux CLI installer (idempotent) --------
+  - path: /usr/local/bin/install-flux-cli.sh
+    permissions: "0755"
+    owner: root:root
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+      if ! command -v flux >/dev/null 2>&1; then
+        curl -s https://fluxcd.io/install.sh | bash
+      fi
+
+  # -------- MinIO setup (disk mount + service), safe if unset --------
+  - path: /usr/local/bin/minio-setup.sh
+    permissions: "0755"
+    owner: root:root
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+      source /etc/cloud/admin.env
+
+      if [[ -z "${BACKUP_MOUNT:-}" || -z "${BACKUP_FSTYPE:-}" ]]; then
+        echo "[minio] BACKUP_MOUNT/BACKUP_FSTYPE not set; skipping."
+        exit 0
+      fi
+
+      mkdir -p "${BACKUP_MOUNT}"
+
+      if [[ -n "${BACKUP_UUID:-}" ]]; then
+        if ! grep -q "${BACKUP_UUID}" /etc/fstab; then
+          echo "UUID=${BACKUP_UUID} ${BACKUP_MOUNT} ${BACKUP_FSTYPE} noatime,nofail 0 2" >> /etc/fstab
+        fi
+        mount -a || true
+      else
+        echo "[minio] No BACKUP_UUID yet; will still install binaries but not enable service."
+      fi
+
+      # Install server + client if missing
+      if ! command -v minio >/dev/null 2>&1; then
+        curl -fsSL https://dl.min.io/server/minio/release/linux-amd64/minio -o /usr/local/bin/minio
+        chmod +x /usr/local/bin/minio
+      fi
+      if ! command -v mc >/dev/null 2>&1; then
+        curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o /usr/local/bin/mc
+        chmod +x /usr/local/bin/mc
+      fi
+
+      # Env + unit
+      mkdir -p /etc/minio
+      cat >/etc/minio/minio.env <<EOF
+      MINIO_ROOT_USER=${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
+      MINIO_VOLUMES=${BACKUP_MOUNT}/minio-data
+      MINIO_SERVER_URL=http://${MINIO_HOSTNAME}:${MINIO_PORT}
+      MINIO_BROWSER_REDIRECT_URL=http://${MINIO_HOSTNAME}:${MINIO_CONSOLE_PORT}
+      EOF
+      chmod 0640 /etc/minio/minio.env
+
+      cat >/etc/systemd/system/minio.service <<'EOF'
+      [Unit]
+      Description=MinIO Object Storage
+      Wants=network-online.target
+      After=network-online.target
+      RequiresMountsFor=/mnt/backup
+
+      [Service]
+      EnvironmentFile=/etc/minio/minio.env
+      ExecStart=/usr/local/bin/minio server $MINIO_VOLUMES --console-address ":9001" --address ":9000"
+      Restart=always
+      LimitNOFILE=65536
+
+      [Install]
+      WantedBy=multi-user.target
+      EOF
+
+      systemctl daemon-reload
+
+      # Only start/enable if the mount exists (UUID provided and mounted)
+      if mountpoint -q "${BACKUP_MOUNT}"; then
+        mkdir -p "${BACKUP_MOUNT}/minio-data"
+        systemctl enable --now minio
+        # configure buckets (idempotent)
+        for i in {1..30}; do
+          curl -fsS "http://127.0.0.1:${MINIO_PORT}/minio/health/ready" && break || sleep 2
+        done
+        mc alias set local "http://127.0.0.1:${MINIO_PORT}" "${MINIO_ROOT_USER}" "${MINIO_ROOT_PASSWORD}" || true
+        mc mb -p "local/${MINIO_BUCKET_LONGHORN}" || true
+        mc mb -p "local/${MINIO_BUCKET_VMS}" || true
+        echo "[minio] running with data at ${BACKUP_MOUNT}/minio-data"
+      else
+        echo "[minio] backup mount not present; service not enabled. Re-run after setting BACKUP_UUID and attaching disk."
+      fi
+
+  # -------- GitOps repo skeleton (Flux-friendly, idempotent) --------
+  - path: /usr/local/bin/gitops-skeleton.sh
+    permissions: "0755"
+    owner: root:root
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+      source /etc/cloud/admin.env
+
+      [[ -z "${GITOPS_DIR:-}" ]] && { echo "[gitops] GITOPS_DIR not set; skipping."; exit 0; }
+      [[ -z "${CLUSTER_NAME:-}" ]] && { echo "[gitops] CLUSTER_NAME not set; skipping."; exit 0; }
+
+      # Non-interactive GitHub host key
+      mkdir -p ~/.ssh
+      ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null || true
+      chmod 600 ~/.ssh/known_hosts || true
+
+      # Prefer the bootstrap key if it exists
+      if [[ -s ~/.ssh/flux-bootstrap ]]; then
+        { grep -q "Host github.com" ~/.ssh/config 2>/dev/null || cat <<'EOF' >> ~/.ssh/config
+      Host github.com
+        User git
+        IdentityFile ~/.ssh/flux-bootstrap
+        IdentitiesOnly yes
+      EOF
+        } && chmod 600 ~/.ssh/config
+      fi
+
+      # Ensure git identity (local)
+      mkdir -p "${GITOPS_DIR}"
+      cd "${GITOPS_DIR}"
+      if [[ ! -d .git ]]; then
+        if [[ -n "${GIT_REMOTE:-}" ]]; then
+          echo "[gitops] cloning ${GIT_REMOTE} into ${GITOPS_DIR}"
+          if git clone --branch "${GIT_BRANCH:-main}" "${GIT_REMOTE}" "${GITOPS_DIR}"; then
+            :
+          else
+            echo "[gitops] clone failed (no deploy key yet?). Initializing local repo."
+            git init -b "${GIT_BRANCH:-main}"
+          fi
+        else
+          git init -b "${GIT_BRANCH:-main}"
+        fi
+      fi
+
+      # Set local identity if provided
+      if [[ -n "${ADMIN_GIT_NAME:-}" ]];  then git config user.name  "${ADMIN_GIT_NAME}";  fi
+      if [[ -n "${ADMIN_GIT_EMAIL:-}" ]]; then git config user.email "${ADMIN_GIT_EMAIL}"; fi
+
+      # Ensure remote configured
+      if [[ -n "${GIT_REMOTE:-}" ]]; then
+        if git remote get-url origin >/dev/null 2>&1; then
+          git remote set-url origin "${GIT_REMOTE}" || true
+        else
+          git remote add origin "${GIT_REMOTE}" || true
+        fi
+      fi
+
+      # Create tree
+      mkdir -p "clusters/${CLUSTER_NAME}" sources/helm infra "config/${CLUSTER_NAME}" policies/gatekeeper/{templates,constraints} apps
+
+      [[ -s .gitignore ]] || echo ".DS_Store" > .gitignore
+      [[ -s README.md  ]] || cat > README.md <<EOF
+      # GitOps (${CLUSTER_NAME})
+      - clusters/${CLUSTER_NAME}: Flux entrypoint
+      - sources: Helm/Git sources
+      - infra: platform stack (ingress, cert-manager, longhorn, metallb, monitoring)
+      - config/${CLUSTER_NAME}: cluster-specific config (issuers, IP pools, StorageClasses, values)
+      - policies/gatekeeper: ConstraintTemplates + Constraints
+      - apps: application stacks
+      EOF
+
+      # Flux entrypoint
+      [[ -s "clusters/${CLUSTER_NAME}/kustomization.yaml" ]] || cat > "clusters/${CLUSTER_NAME}/kustomization.yaml" <<'EOF'
+      apiVersion: kustomize.config.k8s.io/v1beta1
+      kind: Kustomization
+      resources:
+        - sources.yaml
+        - infra.yaml
+        - config.yaml
+        - policies.yaml
+        - apps.yaml
+      EOF
+
+      [[ -s "clusters/${CLUSTER_NAME}/sources.yaml" ]] || cat > "clusters/${CLUSTER_NAME}/sources.yaml" <<'EOF'
+      apiVersion: kustomize.toolkit.fluxcd.io/v1
+      kind: Kustomization
+      metadata: { name: sources, namespace: flux-system }
+      spec:
+        interval: 10m
+        path: ./sources
+        prune: true
+        sourceRef: { kind: GitRepository, name: flux-system }
+      EOF
+
+      [[ -s "clusters/${CLUSTER_NAME}/infra.yaml" ]] || cat > "clusters/${CLUSTER_NAME}/infra.yaml" <<'EOF'
+      apiVersion: kustomize.toolkit.fluxcd.io/v1
+      kind: Kustomization
+      metadata: { name: infra, namespace: flux-system }
+      spec:
+        interval: 5m
+        path: ./infra
+        prune: true
+        sourceRef: { kind: GitRepository, name: flux-system }
+        dependsOn: [ { name: sources } ]
+      EOF
+
+      [[ -s "clusters/${CLUSTER_NAME}/config.yaml" ]] || cat > "clusters/${CLUSTER_NAME}/config.yaml" <<EOF
+      apiVersion: kustomize.toolkit.fluxcd.io/v1
+      kind: Kustomization
+      metadata: { name: ${CLUSTER_NAME}-config, namespace: flux-system }
+      spec:
+        interval: 10m
+        path: ./config/${CLUSTER_NAME}
+        prune: true
+        sourceRef: { kind: GitRepository, name: flux-system }
+        dependsOn: [ { name: infra } ]
+      EOF
+
+      [[ -s "clusters/${CLUSTER_NAME}/policies.yaml" ]] || cat > "clusters/${CLUSTER_NAME}/policies.yaml" <<'EOF'
+      apiVersion: kustomize.toolkit.fluxcd.io/v1
+      kind: Kustomization
+      metadata: { name: policies, namespace: flux-system }
+      spec:
+        interval: 10m
+        path: ./policies
+        prune: true
+        sourceRef: { kind: GitRepository, name: flux-system }
+        dependsOn: [ { name: infra } ]
+      EOF
+
+      [[ -s "clusters/${CLUSTER_NAME}/apps.yaml" ]] || cat > "clusters/${CLUSTER_NAME}/apps.yaml" <<'EOF'
+      apiVersion: kustomize.toolkit.fluxcd.io/v1
+      kind: Kustomization
+      metadata: { name: apps, namespace: flux-system }
+      spec:
+        interval: 5m
+        path: ./apps
+        prune: true
+        sourceRef: { kind: GitRepository, name: flux-system }
+        dependsOn:
+          - name: infra
+          - name: policies
+          - name: '"'"'${CLUSTER_NAME}'"'"'-config
+      EOF
+
+      # HelmRepositories
+      [[ -s sources/helm/jetstack.yaml ]] || cat > sources/helm/jetstack.yaml <<'EOF'
+      apiVersion: source.toolkit.fluxcd.io/v1
+      kind: HelmRepository
+      metadata: { name: jetstack, namespace: flux-system }
+      spec: { interval: 30m, url: https://charts.jetstack.io }
+      EOF
+      [[ -s sources/helm/ingress-nginx.yaml ]] || cat > sources/helm/ingress-nginx.yaml <<'EOF'
+      apiVersion: source.toolkit.fluxcd.io/v1
+      kind: HelmRepository
+      metadata: { name: ingress-nginx, namespace: flux-system }
+      spec: { interval: 30m, url: https://kubernetes.github.io/ingress-nginx }
+      EOF
+      [[ -s sources/helm/metallb.yaml ]] || cat > sources/helm/metallb.yaml <<'EOF'
+      apiVersion: source.toolkit.fluxcd.io/v1
+      kind: HelmRepository
+      metadata: { name: metallb, namespace: flux-system }
+      spec: { interval: 30m, url: https://metallb.github.io/metallb }
+      EOF
+      [[ -s sources/helm/longhorn.yaml ]] || cat > sources/helm/longhorn.yaml <<'EOF'
+      apiVersion: source.toolkit.fluxcd.io/v1
+      kind: HelmRepository
+      metadata: { name: longhorn, namespace: flux-system }
+      spec: { interval: 30m, url: https://charts.longhorn.io }
+      EOF
+
+      # Gatekeeper policies (same as before) ...
+      [[ -s policies/gatekeeper/templates/disallow-latest.yaml ]] || cat > policies/gatekeeper/templates/disallow-latest.yaml <<'EOF'
+      apiVersion: templates.gatekeeper.sh/v1
+      kind: ConstraintTemplate
+      metadata: { name: k8sdisallowlatest }
+      spec:
+        crd: { spec: { names: { kind: K8sDisallowLatest } } }
+        targets:
+        - target: admission.k8s.gatekeeper.sh
+          rego: |
+            package k8sdisallowlatest
+            violation[{"msg": msg}] {
+              input.review.kind.kind == "Pod"
+              some c
+              endswith(lower(input.review.object.spec.containers[c].image), ":latest")
+              msg := sprintf("container %v uses :latest tag", [input.review.object.spec.containers[c].name])
+            }
+      EOF
+      [[ -s policies/gatekeeper/constraints/disallow-latest.yaml ]] || cat > policies/gatekeeper/constraints/disallow-latest.yaml <<'EOF'
+      apiVersion: constraints.gatekeeper.sh/v1beta1
+      kind: K8sDisallowLatest
+      metadata: { name: disallow-latest-images }
+      spec:
+        match: { kinds: [ { apiGroups: [""], kinds: ["Pod"] } ] }
+      EOF
+
+      [[ -s policies/gatekeeper/templates/required-resources.yaml ]] || cat > policies/gatekeeper/templates/required-resources.yaml <<'EOF'
+      apiVersion: templates.gatekeeper.sh/v1
+      kind: ConstraintTemplate
+      metadata: { name: k8srequiredresources }
+      spec:
+        crd: { spec: { names: { kind: K8sRequiredResources } } }
+        targets:
+        - target: admission.k8s.gatekeeper.sh
+          rego: |
+            package k8srequiredresources
+            has_all(r) { r.requests.cpu; r.requests.memory; r.limits.cpu; r.limits.memory }
+            violation[{"msg": msg}] {
+              input.review.kind.kind == "Pod"
+              some i
+              not has_all(input.review.object.spec.containers[i].resources)
+              msg := sprintf("container %v must set cpu/memory requests and limits", [input.review.object.spec.containers[i].name])
+            }
+      EOF
+      [[ -s policies/gatekeeper/constraints/required-resources.yaml ]] || cat > policies/gatekeeper/constraints/required-resources.yaml <<'EOF'
+      apiVersion: constraints.gatekeeper.sh/v1beta1
+      kind: K8sRequiredResources
+      metadata: { name: require-requests-limits }
+      spec:
+        match: { kinds: [ { apiGroups: [""], kinds: ["Pod"] } ] }
+      EOF
+
+      [[ -s policies/gatekeeper/templates/arch-selector.yaml ]] || cat > policies/gatekeeper/templates/arch-selector.yaml <<'EOF'
+      apiVersion: templates.gatekeeper.sh/v1
+      kind: ConstraintTemplate
+      metadata: { name: k8sarchselector }
+      spec:
+        crd: { spec: { names: { kind: K8sArchSelector } } }
+        targets:
+        - target: admission.k8s.gatekeeper.sh
+          rego: |
+            package k8sarchselector
+            violation[{"msg": msg}] {
+              input.review.kind.kind == "Pod"
+              input.review.object.metadata.labels["arch"] == "amd64"
+              not input.review.object.spec.nodeSelector["kubernetes.io/arch"]
+              msg := "pod labeled arch=amd64 must set nodeSelector kubernetes.io/arch=amd64"
+            }
+            violation[{"msg": msg}] {
+              input.review.kind.kind == "Pod"
+              input.review.object.metadata.labels["arch"] == "amd64"
+              input.review.object.spec.nodeSelector["kubernetes.io/arch"] != "amd64"
+              msg := "pod labeled arch=amd64 must target kubernetes.io/arch=amd64"
+            }
+      EOF
+      [[ -s policies/gatekeeper/constraints/arch-selector.yaml ]] || cat > policies/gatekeeper/constraints/arch-selector.yaml <<'EOF'
+      apiVersion: constraints.gatekeeper.sh/v1beta1
+      kind: K8sArchSelector
+      metadata: { name: enforce-amd64-selector-when-labeled }
+      spec:
+        match: { kinds: [ { apiGroups: [""], kinds: ["Pod"] } ] }
+      EOF
+
+      git add -A
+      git commit -m "bootstrap: Flux skeleton for ${CLUSTER_NAME}, sources, Gatekeeper" || true
+      echo "[gitops] skeleton ready at ${GITOPS_DIR}"
+
+  # -------- Flux deploy key generator (safe if user missing) --------
+  - path: /usr/local/bin/flux-generate-key.sh
+    permissions: "0755"
+    owner: root:root
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+      source /etc/cloud/admin.env
+      USERNAME="${ADMIN_USER:-$SUDO_USER}"
+      HOME_DIR="$(getent passwd "$USERNAME" | cut -d: -f6 || echo "/root")"
+      mkdir -p "$HOME_DIR/.ssh"
+      KEYFILE="$HOME_DIR/.ssh/flux-bootstrap"
+
+      if [[ ! -f "${KEYFILE}" ]]; then
+        sudo -u "$USERNAME" ssh-keygen -t ed25519 -C "flux-$(hostname)-$(date +%Y%m%d)" -N "" -f "${KEYFILE}"
+        chown -R "$USERNAME":"$USERNAME" "$HOME_DIR/.ssh"
+        echo "=== Flux deploy pubkey (add as repo deploy key, RW) ==="
+        sudo -u "$USERNAME" cat "${KEYFILE}.pub"
+      else
+        echo "[flux] key exists at ${KEYFILE}"
+      fi
+
+  # -------- Talos config generator --------
+  - path: /usr/local/bin/talos-generate-configs.sh
+    permissions: "0755"
+    owner: root:root
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+      source /etc/cloud/admin.env
+
+      [[ -z "${CLUSTER_NAME:-}" || -z "${VIP_API_IP:-}" ]] && { echo "[talos] CLUSTER_NAME/VIP_API_IP not set; skipping."; exit 0; }
+
+      mkdir -p "$TALOS_OUT_DIR"
+      ENDPOINT="https://${VIP_API_IP}:6443"
+
+      # Only (re)generate if missing or forced
+      if [[ ! -f "$TALOS_OUT_DIR/controlplane.yaml" || ! -f "$TALOS_OUT_DIR/worker.yaml" ]]; then
+        echo "[talos] generating machine configs for $CLUSTER_NAME ($ENDPOINT)"
+
+        # If you want deterministic cluster secrets, set TALOS_SECRETS_FILE or we’ll create one.
+        if [[ -n "${TALOS_SECRETS_FILE:-}" ]]; then
+          [[ -f "$TALOS_SECRETS_FILE" ]] || { echo "[talos] TALOS_SECRETS_FILE not found: $TALOS_SECRETS_FILE"; exit 1; }
+          talosctl gen config "$CLUSTER_NAME" "$ENDPOINT" \
+            --with-secrets "$TALOS_SECRETS_FILE" \
+            --output "$TALOS_OUT_DIR"
+        else
+          # create (or reuse) a secrets file in the output dir
+          SECRETS="$TALOS_OUT_DIR/secrets.yaml"
+          [[ -f "$SECRETS" ]] || talosctl gen secrets --output-file "$SECRETS"
+          talosctl gen config "$CLUSTER_NAME" "$ENDPOINT" \
+            --with-secrets "$SECRETS" \
+            --output "$TALOS_OUT_DIR"
+        fi
+      else
+        echo "[talos] configs already exist in $TALOS_OUT_DIR (skipping gen)"
+      fi
+
+  # -------- convenience wrapper: run all steps safely anytime --------
+  - path: /usr/local/bin/cloud-apply
+    permissions: "0755"
+    owner: root:root
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+      echo "[apply] sourcing /etc/cloud/admin.env"
+      source /etc/cloud/admin.env
+      /usr/local/bin/install-flux-cli.sh
+      /usr/local/bin/minio-setup.sh
+      /usr/local/bin/gitops-skeleton.sh
+      /usr/local/bin/flux-generate-key.sh
+      /usr/local/bin/talos-generate-configs.sh
+      echo "[apply] done."
+
+# --- 4) Commands (ordered; binaries & dirs before starting services) ---
+runcmd:
+  # Apply Netplan Settings
+  - netplan generate
+  - netplan apply
+  # Admin bootstrap (idempotent)
+  - [ bash, -lc, "/usr/local/sbin/admin-setup.sh || true" ]
+  # Prepare directories and service user ownership
+  - [ bash, -lc, "install -d -m 0755 /srv/matchbox/{assets,profiles,groups,configs,ignition} /var/lib/tftpboot /home/${admin_user}/.bashrc.d" ]
+  - [ bash, -lc, "chown -R matchbox:matchbox /srv/matchbox" ]
+  - [ bash, -lc, "chown -R ${admin_user}:${admin_user} /home/${admin_user}/.bashrc.d" ]
+  # optional: useful tools
+  - [ bash, -lc, "apt-get install -y git jq htop nfs-common" ]
+  # Detect architecture → /etc/admin-server-arch.env
+  - |
+    bash -lc '
+      set -eu
+      case "$(uname -m)" in
+        aarch64|arm64) GOARCH=arm64 ;;
+        x86_64|amd64)  GOARCH=amd64 ;;
+        *)             GOARCH=arm64 ;;
+      esac
+      echo "GOARCH=$GOARCH" > /etc/admin-server-arch.env
+    '
+
+  # Install matchbox binary (ARM64/AMD64 aware)
+  - |
+    bash -lc '
+      set -euo pipefail
+      if [ -f /etc/admin-server-arch.env ]; then . /etc/admin-server-arch.env; fi
+      : "${GOARCH:=$(uname -m | sed -e s/aarch64/arm64/ -e s/x86_64/amd64/)}"
+      V="v0.11.0"
+      T="$(mktemp -d /tmp/matchbox.XXXXXX)"
+      curl -fsSL -o "$T/matchbox.tar.gz" \
+        "https://github.com/poseidon/matchbox/releases/download/${V}/matchbox-${V}-linux-${GOARCH}.tar.gz"
+      tar -xzf "$T/matchbox.tar.gz" -C "$T"
+      install -m 0755 "$T/matchbox-${V}-linux-${GOARCH}/matchbox" /usr/local/bin/matchbox
+    '
+
+  # iPXE / TFTP payloads
+  - [ bash, -lc, "install -d -m 0755 /var/lib/tftpboot" ]
+  - [ bash, -lc, "chown -R tftp:tftp /var/lib/tftpboot" ]
+  - [ bash, -lc, "curl -fsSL -o /var/lib/tftpboot/ipxe.efi https://boot.ipxe.org/ipxe.efi || true" ]
+  - [ bash, -lc, "curl -fsSL -o /var/lib/tftpboot/snponly.efi https://boot.ipxe.org/snponly.efi || true" ]
+  - [ bash, -lc, "curl -fsSL -o /var/lib/tftpboot/undionly.kpxe https://boot.ipxe.org/undionly.kpxe || true" ]
+  - [ bash, -lc, "chmod 0644 /var/lib/tftpboot/* || true" ]
+
+  # kubectl (latest stable) and talosctl
+  - |
+    bash -lc '
+      set -eu
+      . /etc/admin-server-arch.env
+      V="$(curl -fsSL https://dl.k8s.io/release/stable.txt)"
+      curl -fsSL -o /usr/local/bin/kubectl "https://dl.k8s.io/release/${V}/bin/linux/${GOARCH}/kubectl"
+      chmod +x /usr/local/bin/kubectl
+      TV="v1.11.1"
+      curl -fsSL -o /usr/local/bin/talosctl "https://github.com/siderolabs/talos/releases/download/${TV}/talosctl-linux-${GOARCH}"
+      chmod +x /usr/local/bin/talosctl
+    '
+
+  # Enable & start services (after everything exists)
+
+  - [ bash, -lc, 'rm -f /usr/sbin/policy-rc.d || true' ]
+
+  - |
+    bash -lc '
+      set -euo pipefail
+      IFACE=$(sed -n "s/^interface=//p" /etc/dnsmasq.d/00-iface.conf)
+      for i in $(seq 1 30); do
+        ip -4 addr show dev "$IFACE" | grep -q "inet " && break
+        sleep 1
+      done
+    '
+
+  - [ bash, -lc, "systemctl daemon-reload" ]
+  - [ bash, -lc, "systemctl enable --now dnsmasq-iface" ]
+  - [ bash, -lc, "dnsmasq --test" ]
+  - [ bash, -lc, "systemctl enable --now dnsmasq matchbox caddy tftpd-hpa" ]
+
+  # Helm & Krew
+  - [ bash, -lc, "/usr/local/bin/helm-install.sh || true" ]
+  - [ bash, -lc, "sudo -u ${admin_user} bash -lc '/usr/local/bin/krew-install.sh' || true" ]
+
+  # Firewall (optional)
+  - [ bash, -lc, "ufw allow OpenSSH; ufw allow http; ufw allow 69/udp; ufw allow 67/udp; ufw allow 6443/tcp; ufw --force enable" ]
+
+  # Ensure .bashrc loads .bashrc.d snippets
+  - [ bash, -lc, 'grep -q bashrc.d "/home/${admin_user}/.bashrc" 2>/dev/null || printf "%s\n" "# Load per-snippet bashrc.d files if present" "if [ -d \"$HOME/.bashrc.d\" ]; then" "  for f in \"$HOME/.bashrc.d/\"*.sh; do [ -r \"$f\" ] && . \"$f\"; done" "fi" >> "/home/${admin_user}/.bashrc"' ]
+  - [ bash, -lc, 'chown ${admin_user}:${admin_user} "/home/${admin_user}/.bashrc" || true' ]
+
+  # Install Flux & Notify
+  - [ bash, -c, "/usr/local/bin/install-flux-cli.sh" ]
+  - [ bash, -c, "echo 'First boot complete. Edit /etc/cloud/admin.env then run: sudo cloud-apply'" ]
+
+final_message: |
+  Admin server ready 🚀
+
+  Next steps:
+   1. Edit /etc/cloud/admin.env to set cluster name, Git repo, and IPs.
+   1a. Run the Skeleton Script and own the directory.
+        sudo /usr/local/bin/gitops-skeleton.sh
+        sudo chown -R jdoswell:jdoswell /srv/
+   2. Generate a Flux SSH key (if not already):
+        ssh-keygen -t ed25519 -C "flux-dozzly-cluster" -N "" -f ~/.ssh/flux-bootstrap
+        cat ~/.ssh/flux-bootstrap.pub
+      → Add this key as a Deploy key (with write access) on GitHub repo jackchild/dozzly-network-home-cluster.
+   3. Allow the VM to use that key for GitHub:
+        ssh-keyscan github.com >> ~/.ssh/known_hosts
+        echo -e "Host github.com\n  User git\n  IdentityFile ~/.ssh/flux-bootstrap\n  IdentitiesOnly yes" >> ~/.ssh/config
+   4. Test GitHub SSH auth:
+        ssh -T git@github.com
+   5. Initialize/push GitOps skeleton:
+        cd /srv/git/dozzly-cluster-gitops
+        git remote add origin git@github.com:dozzly/dozzly-network-home-cluster.git || git remote set-url origin git@github.com:dozzly/dozzly-network-home-cluster.git
+        git branch -M main
+        git push -u origin main
+   6. Generate Talos Keys
+        talosctl kubeconfig --nodes <CONTROL_PLANE_IP> --force
+        export KUBECONFIG=$PWD/kubeconfig
+   7. When first NUC is up and Talos cluster is bootstrapped:
+        flux bootstrap github \
+          --owner dozzly \
+          --repository dozzly-network-home-cluster \
+          --branch main \
+          --path clusters/dozzly-cluster \
+          --private-key-file ~/.ssh/flux-bootstrap
+
+  Notes:
+   - MinIO will only start once BACKUP_UUID is set & disk is attached.
+   - Talos configs are under /srv/talos (regenerated via talos-generate-configs.sh).
+   - GitOps skeleton lives under /srv/git/dozzly-cluster-gitops.
+   - Re-run "sudo cloud-apply" after editing /etc/cloud/admin.env.
+   - kubectl commands:
+   - set admin to arm64 and opt-in only
+   - kubectl taint node atherton role=admin:NoSchedule
+   - kubectl label node atherton node-role.do/arm-admin=true kubernetes.io/arch=arm64 --overwrite
+   - kubectl label node goldstone node-role.do/amd-work=true kubernetes.io/arch=amd64 --overwrite
+   - kubectl label node gee       node-role.do/amd-work=true kubernetes.io/arch=amd64 --overwrite
+final_message: |
+  Admin server ready 🚀
+
+  Next steps:
+   1. Edit /etc/cloud/admin.env to set cluster name, Git repo, and IPs.
+   2. sudo chown -R jdoswell:jdoswell /srv/
+   3. Generate a Flux SSH key (if not already):
+        ssh-keygen -t ed25519 -C "flux-<cluster-name>" -N "" -f ~/.ssh/flux-bootstrap
+        cat ~/.ssh/flux-bootstrap.pub
+      → Add this key as a Deploy key (with write access) on GitHub repo jackchild/dozzly-network-home-cluster.
+   4. Allow the VM to use that key for GitHub:
+        ssh-keyscan github.com >> ~/.ssh/known_hosts
+        echo -e "Host github.com\n  User git\n  IdentityFile ~/.ssh/flux-bootstrap\n  IdentitiesOnly yes" >> ~/.ssh/config
+   5. Test GitHub SSH auth:
+        ssh -T git@github.com
+   6. Initialize/push GitOps skeleton:
+        cd /srv/git/dozzly-cluster-gitops
+        git remote add origin git@github.com:dozzly/dozzly-network-home-cluster.git || git remote set-url origin git@github.com:dozzly/dozzly-network-home-cluster.git
+        git branch -M main
+        git push -u origin main
+   7. When first NUC is up and Talos cluster is bootstrapped:
+        flux bootstrap github \
+          --owner dozzly \
+          --repository dozzly-network-home-cluster \
+          --branch main \
+          --path clusters/dozzly-cluster \
+          --private-key-file ~/.ssh/flux-bootstrap
+
+  Notes:
+   - MinIO will only start once BACKUP_UUID is set & disk is attached.
+   - Talos configs are under /srv/talos (regenerated via talos-generate-configs.sh).
+   - GitOps skeleton lives under /srv/git/dozzly-cluster-gitops.
+   - Re-run "sudo cloud-apply" after editing /etc/cloud/admin.env.
+    # admin VM (arm64)
+   - kubectl label node atherton node-role.do/arm-admin=true kubernetes.io/arch=arm64 --overwrite
+    # NUCs (amd64)
+   - kubectl label node goldstone node-role.do/amd-work=true kubernetes.io/arch=amd64 --overwrite
+   - kubectl label node gee       node-role.do/amd-work=true kubernetes.io/arch=amd64 --overwrite

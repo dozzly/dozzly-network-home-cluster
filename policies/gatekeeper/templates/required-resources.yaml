@@ -1,0 +1,16 @@
+apiVersion: templates.gatekeeper.sh/v1
+kind: ConstraintTemplate
+metadata: { name: k8srequiredresources }
+spec:
+  crd: { spec: { names: { kind: K8sRequiredResources } } }
+  targets:
+  - target: admission.k8s.gatekeeper.sh
+    rego: |
+      package k8srequiredresources
+      has_all(r) { r.requests.cpu; r.requests.memory; r.limits.cpu; r.limits.memory }
+      violation[{"msg": msg}] {
+        input.review.kind.kind == "Pod"
+        some i
+        not has_all(input.review.object.spec.containers[i].resources)
+        msg := sprintf("container %v must set cpu/memory requests and limits", [input.review.object.spec.containers[i].name])
+      }

@@ -1,0 +1,56 @@
+apiVersion: templates.gatekeeper.sh/v1
+kind: ConstraintTemplate
+metadata:
+  name: k8snonroot
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sNonRoot
+  targets:
+  - target: admission.k8s.gatekeeper.sh
+    rego: |
+      package k8snonroot
+
+      # Namespaces allowed to run root (tweak as needed)
+      allowed_ns := {
+        "kube-system",
+        "flux-system",
+        "cert-manager",
+        "metallb-system",
+        "traefik",
+        "longhorn-system"
+      }
+
+      is_exempt {
+        input.review.object.metadata.namespace == ns
+        ns := allowed_ns[_]
+      }
+
+      # A container violates if:
+      # - it doesn't set runAsNonRoot true AND doesn't set runAsUser, or
+      # - it explicitly sets runAsUser: 0
+      violates(c) {
+        not c.securityContext.runAsNonRoot
+        not c.securityContext.runAsUser
+      }
+      is_root_uid(c) {
+        c.securityContext.runAsUser == 0
+      }
+
+      violation[{"msg": msg}] {
+        not is_exempt
+        input.review.kind.kind == "Pod"
+        c := input.review.object.spec.containers[_]
+        violates(c) or is_root_uid(c)
+        msg := sprintf("container %q must run as non-root (set runAsNonRoot: true or runAsUser != 0)", [c.name])
+      }
+
+      violation[{"msg": msg}] {
+        not is_exempt
+        input.review.kind.kind == "Pod"
+        c := input.review.object.spec.initContainers[_]
+        violates(c) or is_root_uid(c)
+        msg := sprintf("initContainer %q must run as non-root (set runAsNonRoot: true or runAsUser != 0)", [c.name])
+      }
+

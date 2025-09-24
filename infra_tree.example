@@ -1,0 +1,51 @@
+dozzly-network-home-cluster/
+├─ README.md
+├─ admin-server/
+│  └─ cloud-init/                 # your current admin VM build
+├─ bootstrap/
+│  └─ flux/                       # optional: scripts/notes for flux bootstrap
+├─ sources/                       # *only* source definitions (Flux can depend on these)
+│  ├─ helm/
+│  │  ├─ jetstack.yaml            # cert-manager HelmRepository
+│  │  ├─ longhorn.yaml            # longhorn HelmRepository
+│  │  ├─ grafana.yaml             # grafana/prom stack
+│  │  └─ metallb.yaml
+│  └─ git/
+│     └─ apps.yaml                # (if you pull another repo with app manifests)
+├─ infra/                         # platform layer, reusable across clusters
+│  ├─ ingress/                    # e.g., nginx/traefik HelmRelease + ns
+│  ├─ cert-manager/               # HelmRelease only (no issuers here)
+│  ├─ metallb/                    # HelmRelease only (no IP pools here)
+│  ├─ longhorn/                   # HelmRelease + default StorageClasses (generic)
+│  ├─ monitoring/                 # kube-prometheus-stack HelmRelease
+│  ├─ logging/                    # loki/promtail
+│  └─ kustomization.yaml          # lists all infra components
+├─ policies/
+│  ├─ gatekeeper/
+│  │  ├─ templates/               # ConstraintTemplates
+│  │  ├─ constraints/             # Constraints
+│  │  └─ kustomization.yaml
+│  └─ network/                    # default deny, etc.
+├─ apps/
+│  ├─ home-assistant/             # example app (HelmRelease/kustomize)
+│  ├─ jellyfin/
+│  └─ kustomization.yaml
+├─ config/                        # cluster/env-specific config & secrets
+│  ├─ homelab/
+│  │  ├─ cluster-issuers.yaml     # cert-manager ClusterIssuer (LE staging/prod)
+│  │  ├─ metallb-ipaddresspools.yaml
+│  │  ├─ longhorn-storageclasses.yaml
+│  │  ├─ namespaces.yaml
+│  │  ├─ values/
+│  │  │  ├─ ingress-nginx.values.yaml
+│  │  │  └─ kube-prom.values.yaml
+│  │  └─ secrets.enc.yaml         # SOPS-encrypted (age)
+│  └─ kustomization.yaml
+└─ clusters/
+   └─ homelab/                    # the *entrypoint* Flux watches
+      ├─ flux-system/             # created by `flux bootstrap`
+      ├─ kustomization.yaml       # references sources/, then infra/, policies/, apps/, config/homelab
+      ├─ infra.yaml               # Flux Kustomization: deploy infra/ with dependsOn
+      ├─ policies.yaml            # Flux Kustomization: deploy policies/
+      ├─ config.yaml              # Flux Kustomization: per-cluster objects (issuers, pools, SCs)
+      └─ apps.yaml                # Flux Kustomization: deploy apps/ (dependsOn infra)

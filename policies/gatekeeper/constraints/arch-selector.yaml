@@ -1,0 +1,5 @@
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sArchSelector
+metadata: { name: enforce-amd64-selector-when-labeled }
+spec:
+  match: { kinds: [ { apiGroups: [""], kinds: ["Pod"] } ] }

@@ -1,0 +1,39 @@
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: traefik
+  namespace: traefik
+spec:
+  interval: 30m
+  chart:
+    spec:
+      chart: traefik
+      version: 37.1.0            # any recent stable
+      sourceRef:
+        kind: HelmRepository
+        name: traefik
+        namespace: flux-system
+  install:
+    createNamespace: true
+  values:
+    ingressClass:
+      enabled: true
+      isDefaultClass: true        # optional; makes traefik default
+      name: traefik
+    service:
+      type: LoadBalancer
+      loadBalancerIP: 192.168.150   # pin to your Ingress VIP
+      annotations: {}             # (optional MetalLB annotations)
+    ports:
+      web:
+        redirectTo: websecure     # HTTP->HTTPS
+      websecure:
+        tls:
+          enabled: true
+    providers:
+      kubernetesIngress:
+        publishedService:
+          enabled: true           # needed for proper external IP in status
+    logs:
+      general: { level: INFO }
+      access: { enabled: true }

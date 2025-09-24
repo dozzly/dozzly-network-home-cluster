@@ -1,0 +1,37 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: pod-defaults-nonroot
+spec:
+  admission: true
+  background: true
+  rules:
+  - name: add-run-as-non-root
+    match:
+      any:
+      - resources:
+          kinds:
+            - Pod
+            - Deployment
+            - StatefulSet
+            - DaemonSet
+            - Job
+            - CronJob
+    exclude:
+      any:
+      - resources:
+          namespaces:
+            - kube-system
+            - flux-system
+            - cert-manager
+            - metallb-system
+            - traefik
+            - longhorn-system
+    mutate:
+      # For workload types, Kyverno targets the Pod template via strategic merge
+      patchStrategicMerge:
+        spec:
+          template:
+            spec:
+              securityContext:
+                +(runAsNonRoot): true

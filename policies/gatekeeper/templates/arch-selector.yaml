@@ -1,0 +1,21 @@
+apiVersion: templates.gatekeeper.sh/v1
+kind: ConstraintTemplate
+metadata: { name: k8sarchselector }
+spec:
+  crd: { spec: { names: { kind: K8sArchSelector } } }
+  targets:
+  - target: admission.k8s.gatekeeper.sh
+    rego: |
+      package k8sarchselector
+      violation[{"msg": msg}] {
+        input.review.kind.kind == "Pod"
+        input.review.object.metadata.labels["arch"] == "amd64"
+        not input.review.object.spec.nodeSelector["kubernetes.io/arch"]
+        msg := "pod labeled arch=amd64 must set nodeSelector kubernetes.io/arch=amd64"
+      }
+      violation[{"msg": msg}] {
+        input.review.kind.kind == "Pod"
+        input.review.object.metadata.labels["arch"] == "amd64"
+        input.review.object.spec.nodeSelector["kubernetes.io/arch"] != "amd64"
+        msg := "pod labeled arch=amd64 must target kubernetes.io/arch=amd64"
+      }

@@ -1,0 +1,23 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: whoami
+  namespace: whoami
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-staging   # switch to prod later
+spec:
+  ingressClassName: traefik
+  tls:
+  - hosts: [ "whoami.downhill.dozzly.network" ]
+    secretName: whoami-tls
+  rules:
+  - host: whoami.downhill.dozzly.network
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: whoami
+            port:
+              number: 80
