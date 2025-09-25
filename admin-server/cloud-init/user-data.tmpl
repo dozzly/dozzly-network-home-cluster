@@ -289,29 +289,41 @@ write_files:
       CLUSTER_NAME="dozzly-cluster"
       CLUSTER_DOMAIN="downhill.dozzly.network"
       CREATE_FLUX_SECRET=yes
-      
+
       # VIPs / host IPs
       VIP_INGRESS_IP="192.168.1.150"
       VIP_API_IP="192.168.1.151"
+
+      ADMIN_VM_HOSTNAME="atherton"
       ADMIN_VM_IP="192.168.1.152"
 
-      NUC1_IP="192.168.1.153"
-      NUC1_MAC=AA:BB:CC:DD:EE:01
-      NUC1_ROLE=worker
-      NUC1_IFACE=enp1s0
+      CONTROL_VM_IP="192.168.1.155"
+      CONTROL_VM_HOSTNAME="warner"
+      CONTROL_VM_IFACE=enp1s0
+      CONTROL_VM_MAC="AA:BB:CC:DD:EE:03"
+      CONTROL_VM_ROLE=control
 
+      NUC1_HOSTNAME="goldstone"
+      NUC1_IP="192.168.1.153"
+      NUC1_IFACE=enp1s0
+      NUC1_MAC=AA:BB:CC:DD:EE:01
+      NUC1_ROLE=control
+
+      NUC2_HOSTNAME="gee"
       NUC2_IP="192.168.1.154"
       NUC2_MAC=AA:BB:CC:DD:EE:02
-      NUC2_ROLE=worker
+      NUC2_ROLE=control
       NUC2_IFACE=enp1s0
 
       GATEWAY=192.168.1.1
       DNS1=1.1.1.1
       DNS2=8.8.8.8
-      
+
       # Where to stash Talos outputs
       TALOS_OUT_DIR="/srv/talos"
       TALOS_VERSION="v1.11.1"
+      TALOS_FORCE_REGEN="no"
+
       # MinIO creds (change later/rotate as needed)
       MINIO_ROOT_USER="minioadmin"
       MINIO_ROOT_PASSWORD="change-me-please"
@@ -323,7 +335,7 @@ write_files:
 
       # GitOps repo (Flux will read from this)
       GITOPS_DIR="/srv/git/dozzly-network-home-cluster"
-      GIT_REMOTE="git@github.com:jackchild/dozzly-network-home-cluster.git"
+      GIT_REMOTE="git@github.com:dozzly/dozzly-network-home-cluster.git"
       GIT_BRANCH="main"
       ADMIN_GIT_NAME="dozzly"
       ADMIN_GIT_EMAIL="jack.child@gmail.com"
@@ -749,95 +761,17 @@ write_files:
     content: |
       #!/usr/bin/env bash
       set -Eeuo pipefail
-      export DEBIAN_FRONTEND=noninteractive
-
-      : "${MATCHBOX_DIR:=/srv/matchbox}"
-      : "${TALOS_CONFIGS_DIR:=/srv/talos}"
-
-      : "${ADMIN_VM_IP:?set ADMIN_VM_IP in /etc/cloud/admin.env}"
-      : "${NUC1_IP:?set NUC1_IP in /etc/cloud/admin.env}"
-      : "${NUC2_IP:?set NUC2_IP in /etc/cloud/admin.env}"
-
-      : "${VM_IFACE:=enp0s1}"
-      : "${NUC1_IFACE:=enp1s0}"
-      : "${NUC2_IFACE:=enp1s0}"
-      : "${GATEWAY:=192.168.1.1}"
-      : "${DNS1:=1.1.1.1}"
-      : "${DNS2:=8.8.8.8}"
-
-      configs_dir="$MATCHBOX_DIR/configs"
-      src_cp="$TALOS_CONFIGS_DIR/controlplane.yaml"
-
-      log(){ echo "[$(date -Is)] $*"; }
-
-      ensure_yq_v4() {
-        if command -v yq >/dev/null 2>&1 && yq --version 2>&1 | grep -qi 'mikefarah'; then return; fi
-        log "Installing yq v4 (mikefarah)…"
-        case "$(uname -m)" in
-          x86_64|amd64) bin="yq_linux_amd64" ;;
-          aarch64|arm64) bin="yq_linux_arm64" ;;
-          *) echo "Unsupported arch"; exit 1 ;;
-        esac
-        curl -fsSL "https://github.com/mikefarah/yq/releases/latest/download/${bin}" -o /usr/local/bin/yq
-        chmod +x /usr/local/bin/yq
-      }
-
-      validate_ip(){ [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}(/([0-9]|[12][0-9]|3[0-2]))?$ ]]; }
-
-      patch_cfg() {
-        local in="$1" ip="$2" iface="$3" host="$4" out="$5"
-        if [[ "$ip" != */* ]]; then ip="${ip}/24"; fi
-        for v in "$ip" "$GATEWAY" "$DNS1"; do validate_ip "$v" || { echo "Invalid IP: $v"; exit 1; }; done
-        [[ -z "${DNS2:-}" ]] || validate_ip "$DNS2" || { echo "Invalid DNS2: $DNS2"; exit 1; }
-        local tmp; tmp="$(mktemp)"
-        cp "$in" "$tmp"
-        yq eval -i '
-          .machine.hostname = "'"$host"'" |
-          .machine.network.interfaces = [
-            {
-              "interface": "'"$iface"'",
-              "addresses": ["'"$ip"'"],
-              "routes": [ { "network": "0.0.0.0/0", "gateway": "'"$GATEWAY"'" } ],
-              "nameservers": (["'"$DNS1"'"] + ( "'"$DNS2"'" | select(. != "") | [.] ))
-            }
-          ]
-        ' "$tmp"
-        install -D -m 0644 "$tmp" "$out"
-        rm -f "$tmp"
-      }
-
-      main() {
-        install -d -m 0755 "$configs_dir"
-        [[ -f "$src_cp" ]] || { echo "ERR: $src_cp missing"; exit 1; }
-        ensure_yq_v4
-
-        log "Publishing CP (VM)   -> $configs_dir/controlplane-vm.yaml (IP=$ADMIN_VM_IP iface=$VM_IFACE host=cp-vm)"
-        patch_cfg "$src_cp" "$ADMIN_VM_IP" "$VM_IFACE" "cp-vm" "$configs_dir/controlplane-vm.yaml"
-
-        log "Publishing CP (NUC1) -> $configs_dir/controlplane-nuc1.yaml (IP=$NUC1_IP iface=$NUC1_IFACE host=cp-nuc1)"
-        patch_cfg "$src_cp" "$NUC1_IP" "$NUC1_IFACE" "cp-nuc1" "$configs_dir/controlplane-nuc1.yaml"
-
-        log "Publishing CP (NUC2) -> $configs_dir/controlplane-nuc2.yaml (IP=$NUC2_IP iface=$NUC2_IFACE host=cp-nuc2)"
-        patch_cfg "$src_cp" "$NUC2_IP" "$NUC2_IFACE" "cp-nuc2" "$configs_dir/controlplane-nuc2.yaml"
-
-        log "Done. Example: curl http://$ADMIN_VM_IP:8080/configs/controlplane-nuc1.yaml"
-      }
-      main "$@"
-
-  - path: /usr/local/bin/matchbox-write-cp-profile-and-groups.sh
-    permissions: "0755"
-    owner: root:root
-    content: |
-
-      #!/usr/bin/env bash
-      set -Eeuo pipefail
 
       : "${MATCHBOX_DIR:=/srv/matchbox}"
       : "${MATCHBOX_HTTP_PORT:=8080}"
       : "${ADMIN_VM_IP:?set ADMIN_VM_IP in /etc/cloud/admin.env}"
       : "${TALOS_VERSION:?set TALOS_VERSION in /etc/cloud/admin.env (e.g., v1.7.0)}"
+      : "${CONTROL_VM_MAC:?set CONTROL_VM_MAC in /etc/cloud/admin.env}"
       : "${NUC1_MAC:?set NUC1_MAC in /etc/cloud/admin.env}"
       : "${NUC2_MAC:?set NUC2_MAC in /etc/cloud/admin.env}"
+      : "${CONTROL_VM_HOSTNAME:?set CONTROL_VM_HOSTNAME in /etc/cloud/admin.env}"
+      : "${NUC1_HOSTNAME:?set NUC1_HOSTNAME in /etc/cloud/admin.env}"
+      : "${NUC2_HOSTNAME:?set NUC2_HOSTNAME in /etc/cloud/admin.env}"
 
       profiles_dir="$MATCHBOX_DIR/profiles"
       groups_dir="$MATCHBOX_DIR/groups"
@@ -865,34 +799,46 @@ write_files:
       }
       JSON
 
-      # 2) Two per-node groups (control-planes), each points to its config file
+      # 2) Three per-node groups (control-planes), each points to its config file
+      cvm_mac_uc="$(printf '%s' "$CONTROL_VM_MAC" | upper)"
       nuc1_mac_uc="$(printf '%s' "$NUC1_MAC" | upper)"
       nuc2_mac_uc="$(printf '%s' "$NUC2_MAC" | upper)"
 
-      cat > "$groups_dir/nuc-1.json" <<JSON
+      cat > "$groups_dir/${CONTROL_VM_HOSTNAME}.json" <<JSON
       {
-        "id": "nuc-1",
-        "name": "NUC 1 (control-plane)",
+        "id": "${CONTROL_VM_HOSTNAME}",
+        "name": "${CONTROL_VM_HOSTNAME} (control-plane)",
         "profile": "talos-controlplane",
-        "selector": { "mac": "${nuc1_mac_uc}" },
-        "metadata": { "http_ip": "${ADMIN_VM_IP}", "config": "controlplane-nuc1.yaml" }
+        "selector": { "mac": "${cvm_mac_uc}" },
+        "metadata": { "http_ip": "${ADMIN_VM_IP}", "config": "controlplane-${CONTROL_VM_HOSTNAME}.yaml" }
       }
       JSON
 
-      cat > "$groups_dir/nuc-2.json" <<JSON
+      cat > "$groups_dir/${NUC1_HOSTNAME}.json" <<JSON
       {
-        "id": "nuc-2",
-        "name": "NUC 2 (control-plane)",
+        "id": "${NUC1_HOSTNAME}",
+        "name": "${NUC1_HOSTNAME} (control-plane)",
+        "profile": "talos-controlplane",
+        "selector": { "mac": "${nuc1_mac_uc}" },
+        "metadata": { "http_ip": "${ADMIN_VM_IP}", "config": "controlplane-${NUC1_HOSTNAME}.yaml" }
+      }
+      JSON
+
+      cat > "$groups_dir/${NUC2_HOSTNAME}.json" <<JSON
+      {
+        "id": "${NUC2_HOSTNAME}",
+        "name": "${NUC2_HOSTNAME} (control-plane)",
         "profile": "talos-controlplane",
         "selector": { "mac": "${nuc2_mac_uc}" },
-        "metadata": { "http_ip": "${ADMIN_VM_IP}", "config": "controlplane-nuc2.yaml" }
+        "metadata": { "http_ip": "${ADMIN_VM_IP}", "config": "controlplane-${NUC2_HOSTNAME}.yaml" }
       }
       JSON
 
       echo "[matchbox] wrote:"
       echo "  $profiles_dir/talos-controlplane.json"
-      echo "  $groups_dir/nuc-1.json"
-      echo "  $groups_dir/nuc-2.json"
+      echo "  $groups_dir/${CONTROL_VM_HOSTNAME}.json"
+      echo "  $groups_dir/${NUC1_HOSTNAME}.json"
+      echo "  $groups_dir/${NUC2_HOSTNAME}.json"
 
       # Optional: nudge matchbox if running under systemd (it hot-reads JSON, so this is not required)
       if systemctl is-active --quiet matchbox 2>/dev/null; then
@@ -1098,13 +1044,40 @@ runcmd:
       install -m 0755 "$T/matchbox-${V}-linux-${GOARCH}/matchbox" /usr/local/bin/matchbox
     '
 
-  # iPXE / TFTP payloads
-  - [ bash, -lc, "install -d -m 0755 /var/lib/tftpboot" ]
+  # iPXE / TFTP payloads (place binaries under /var/lib/tftpboot/ipxe)
+  - [ bash, -lc, "install -d -m 0755 /var/lib/tftpboot/ipxe" ]
   - [ bash, -lc, "chown -R tftp:tftp /var/lib/tftpboot" ]
-  - [ bash, -lc, "curl -fsSL -o /var/lib/tftpboot/ipxe.efi https://boot.ipxe.org/ipxe.efi || true" ]
-  - [ bash, -lc, "curl -fsSL -o /var/lib/tftpboot/snponly.efi https://boot.ipxe.org/snponly.efi || true" ]
-  - [ bash, -lc, "curl -fsSL -o /var/lib/tftpboot/undionly.kpxe https://boot.ipxe.org/undionly.kpxe || true" ]
-  - [ bash, -lc, "chmod 0644 /var/lib/tftpboot/* || true" ]
+
+  # Provide x86 BIOS chainloader (optional, harmless on ARM-only labs)
+  - [ bash, -lc, "curl -fsSL -o /var/lib/tftpboot/ipxe/undionly.kpxe https://boot.ipxe.org/undionly.kpxe || true" ]
+  - [ bash, -lc, "curl -fsSL -o /var/lib/tftpboot/ipxe/ipxe.efi https://boot.ipxe.org/ipxe.efi || true" ]
+  - [ bash, -lc, "curl -fsSL -o /var/lib/tftpboot/ipxe/snponly.efi https://boot.ipxe.org/snponly.efi || true" ]
+
+  # Build or fetch the correct UEFI binaries for this host arch
+  - |
+    bash -lc '
+      set -euo pipefail
+      ARCH="$(uname -m)"
+      TFTP=/var/lib/tftpboot/ipxe
+
+      if [[ "$ARCH" = "aarch64" || "$ARCH" = "arm64" ]]; then
+        # Build ARM64 UEFI iPXE locally (most reliable)
+        apt-get update -y
+        apt-get install -y --no-install-recommends build-essential git liblzma-dev mtools xz-utils uuid-dev
+        tmp="$(mktemp -d)"; trap "rm -rf \"$tmp\"" EXIT
+        git clone --depth 1 https://github.com/ipxe/ipxe.git "$tmp/ipxe"
+        make -C "$tmp/ipxe/src" -j"$(nproc)" bin-arm64-efi/snponly.efi bin-arm64-efi/ipxe.efi
+        install -m 0644 "$tmp/ipxe/src/bin-arm64-efi/snponly.efi" "$TFTP/snponly_arm64.efi"
+        install -m 0644 "$tmp/ipxe/src/bin-arm64-efi/ipxe.efi"     "$TFTP/ipxe_arm64.efi"
+      else
+        # On AMD64 hosts you might want x86_64 UEFI too (for x86 clients)
+        curl -fsSL -o "$TFTP/ipxe_x86_64.efi" https://boot.ipxe.org/ipxe.efi || true
+        # (snponly_x86_64.efi is not directly published; build if needed)
+      fi
+      chown -R tftp:tftp /var/lib/tftpboot
+      chmod 0644 /var/lib/tftpboot/ipxe/* || true
+    '
+
 
   # kubectl (latest stable) and talosctl
   - |
@@ -1229,3 +1202,27 @@ final_message: |
    - Talos configs are under /srv/talos (regenerated via talos-generate-configs.sh).
    - GitOps skeleton lives under /srv/git/dozzly-network-home-cluster.
    - Re-run "sudo cloud-apply" after editing /etc/cloud/admin.env.
+
+
+
+: "${ADMIN_VM_IP:?set ADMIN_VM_IP in /etc/cloud/admin.env}"
+: "${CONTROL_VM_HOSTNAME:?set CONTROL_VM_HOSTNAME in /etc/cloud/admin.env}"
+: "${CONTROL_VM_IP:?set CONTROL_VM_IP in /etc/cloud/admin.env}"
+: "${CONTROL_VM_IFACE:?set CONTROL_VM_IFACE in /etc/cloud/admin.env}"
+: "${CONTROL_VM_ROLE:?set CONTROL_VM_ROLE in /etc/cloud/admin.env}"
+
+: "${NUC1_HOSTNAME:?set NUC1_HOSTNAME in /etc/cloud/admin.env}"
+: "${NUC1_IP:?set NUC1_IP in /etc/cloud/admin.env}"
+: "${NUC1_IFACE:?set NUC1_IFACE in /etc/cloud/admin.env}"
+: "${NUC2_HOSTNAME:?set NUC2_HOSTNAME in /etc/cloud/admin.env}"
+: "${NUC2_IP:?set NUC2_IP in /etc/cloud/admin.env}"
+: "${NUC2_IFACE:?set NUC2_IFACE in /etc/cloud/admin.env}"
+: "${GATEWAY:?set GATEWAY in /etc/cloud/admin.env}"
+: "${DNS1:?set DNS1 in /etc/cloud/admin.env}"
+: "${DNS2:?set DNS2 in /etc/cloud/admin.env}"
+
+
+
+
+
+
