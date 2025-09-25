@@ -152,38 +152,106 @@ write_files:
       echo "== matchbox logs =="; journalctl -u matchbox -b --no-pager | tail -n 120
 
   # dnsmasq minimal ProxyDHCP config (NO bind-interfaces here; we set it via 00-iface.conf)
-  - path: /etc/dnsmasq.d/pxe.conf
+  - path: /usr/local/sbin/setup-pxe.sh
     permissions: "0644"
     owner: "root:root"
     content: |-
-      # ProxyDHCP only: do not run a DNS server (avoid port 53 conflicts)
+      #!/usr/bin/env bash
+      set -euo pipefail
+
+      # Load admin config
+      if [[ -f /etc/cloud/admin.env ]]; then
+        # shellcheck disable=SC1091
+        . /etc/cloud/admin.env
+      fi
+
+      # --- Required variables (from /etc/cloud/admin.env) ---
+      ADMIN_VM_IP="${ADMIN_VM_IP:-}"
+      NUC1_MAC="${NUC1_MAC:-}"
+      NUC2_MAC="${NUC2_MAC:-}"
+      : "${ADMIN_VM_IP:?Set ADMIN_VM_IP in /etc/cloud/admin.env}"
+
+      echo "[setup-pxe] using ADMIN_VM_IP=${ADMIN_VM_IP}"
+
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update -y
+      apt-get install -y --no-install-recommends dnsmasq tftpd-hpa curl ca-certificates \
+        build-essential git liblzma-dev mtools xz-utils uuid-dev file jq
+
+      # ---------- TFTP layout ----------
+      TFTP_ROOT=/var/lib/tftpboot
+      IPXE_DIR="$TFTP_ROOT/ipxe"
+      install -d -m 0755 "$IPXE_DIR"
+      chown -R tftp:tftp "$TFTP_ROOT"
+
+      # x86 BIOS PXE (optional)
+      curl -fsSL -o "$IPXE_DIR/undionly.kpxe" https://boot.ipxe.org/undionly.kpxe || true
+
+      # x86_64 UEFI iPXE (prebuilt)
+      # Note: boot.ipxe.org/ipxe.efi is x86_64 UEFI
+      curl -fsSL -o "$IPXE_DIR/ipxe_x86_64.efi" https://boot.ipxe.org/ipxe.efi
+
+      # ARM64 UEFI iPXE (build locally). Avoid VERSION* leaks; relax WERROR.
+      tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+      git clone --depth 1 https://github.com/ipxe/ipxe.git "$tmp/ipxe"
+      env -u VERSION -u VERSION_MAJOR -u VERSION_MINOR -u VERSION_PATCH \
+        make -C "$tmp/ipxe/src" WERROR=0 -j"$(nproc)" bin-arm64-efi/snponly.efi bin-arm64-efi/ipxe.efi
+      install -m 0644 "$tmp/ipxe/src/bin-arm64-efi/snponly.efi" "$IPXE_DIR/snponly_arm64.efi"
+      install -m 0644 "$tmp/ipxe/src/bin-arm64-efi/ipxe.efi"     "$IPXE_DIR/ipxe_arm64.efi"
+
+      chown -R tftp:tftp "$TFTP_ROOT"
+      chmod 0644 "$IPXE_DIR"/* || true
+
+      # Sanity: confirm architectures
+      file "$IPXE_DIR/ipxe_x86_64.efi" | grep -q 'x86-64' || { echo "ipxe_x86_64.efi not x86-64"; exit 1; }
+      file "$IPXE_DIR/snponly_arm64.efi" "$IPXE_DIR/ipxe_arm64.efi" | grep -q 'AARCH64' || { echo "ARM64 iPXE not AARCH64"; exit 1; }
+
+      # ---------- dnsmasq ProxyDHCP ----------
+      cat >/etc/dnsmasq.d/pxe.conf <<EOF
+      # ProxyDHCP only
       port=0
+      log-dhcp
 
-      # Tag clients by architecture (DHCP option 93)
-      dhcp-match=set:bios,option:client-arch,0
-      dhcp-match=set:efi32,option:client-arch,6
-      dhcp-match=set:efi64,option:client-arch,7
-      dhcp-match=set:efi64http,option:client-arch,9
-      dhcp-match=set:efiarm32,option:client-arch,10
-      dhcp-match=set:efiarm64,option:client-arch,11
-
-      # Detect iPXE (user-class option 77)
-      dhcp-userclass=set:ipxe,iPXE
-
-      # If already running iPXE → chain to HTTP boot script
-      dhcp-boot=net:ipxe,http://${admin_server_ip}:8080/boot.ipxe
-
-      # Otherwise serve the right binary depending on firmware/arch
-      dhcp-boot=tag:bios,undionly.kpxe,,${admin_server_ip}
-      dhcp-boot=tag:efi64,ipxe.efi,,${admin_server_ip}
-      dhcp-boot=tag:efi64http,ipxe.efi,,${admin_server_ip}
-      dhcp-boot=tag:efiarm64,snponly.efi,,${admin_server_ip}
-
-      # Proxy range (we don’t assign leases)
+      # No leases here; we're just the PXE proxy
       dhcp-range=192.168.1.0,proxy
 
-      # DHCP logs
-      log-dhcp
+      # Arch tags (DHCP option 93)
+      dhcp-match=set:bios,option:client-arch,0
+      dhcp-match=set:efi64,option:client-arch,7
+      dhcp-match=set:efiarm64,option:client-arch,11
+
+      # Detect iPXE (user-class 77)
+      dhcp-userclass=set:ipxe,iPXE
+
+      # iPXE clients -> matchbox
+      dhcp-boot=net:ipxe,http://${ADMIN_VM_IP}:8080/boot.ipxe?mac=\${net0/mac}
+
+      # First-stage binaries
+      dhcp-boot=tag:bios,ipxe/undionly.kpxe,,${ADMIN_VM_IP}
+      dhcp-boot=tag:efi64,ipxe/ipxe_x86_64.efi,,${ADMIN_VM_IP}
+      dhcp-boot=tag:efiarm64,ipxe/snponly_arm64.efi,,${ADMIN_VM_IP}
+      EOF
+
+      # Ensure tftpd-hpa serves our TFTP root
+      if grep -q '^TFTP_DIRECTORY=' /etc/default/tftpd-hpa 2>/dev/null; then
+        sed -i "s|^TFTP_DIRECTORY=.*|TFTP_DIRECTORY=\"$TFTP_ROOT\"|g" /etc/default/tftpd-hpa
+      else
+        cat >/etc/default/tftpd-hpa <<EOD
+      TFTP_USERNAME="tftp"
+      TFTP_DIRECTORY="$TFTP_ROOT"
+      TFTP_ADDRESS="0.0.0.0:69"
+      TFTP_OPTIONS="--secure"
+      EOD
+      fi
+
+      # ---------- restart services ----------
+      systemctl daemon-reload
+      systemctl enable --now tftpd-hpa
+      systemctl restart tftpd-hpa
+      systemctl enable --now dnsmasq
+      systemctl restart dnsmasq
+
+      echo "[setup-pxe] ready: ProxyDHCP (dnsmasq) + TFTP ($TFTP_ROOT) + iPXE (arm64 + x86_64)."
 
   # Simple iPXE script (example: Talos)
   - path: /srv/matchbox/pxe/talos.ipxe
@@ -871,6 +939,7 @@ write_files:
       echo "[apply] sourcing /etc/cloud/admin.env"
       source /etc/cloud/admin.env
 
+      run /usr/local/sbin/setup-pxe.sh
       run /usr/local/bin/install-flux-cli.sh
       run /usr/local/bin/minio-setup.sh
       run /usr/local/bin/gitops-skeleton.sh
@@ -1109,7 +1178,7 @@ runcmd:
   - [ bash, -lc, "systemctl daemon-reload" ]
   - [ bash, -lc, "systemctl enable --now dnsmasq-iface" ]
   - [ bash, -lc, "dnsmasq --test" ]
-  - [ bash, -lc, "systemctl enable --now dnsmasq matchbox caddy tftpd-hpa" ]
+  - [ bash, -lc, "systemctl enable --now matchbox caddy tftpd-hpa" ]
 
   # Helm & Krew
   - [ bash, -lc, "/usr/local/bin/helm-install.sh || true" ]
@@ -1202,27 +1271,5 @@ final_message: |
    - Talos configs are under /srv/talos (regenerated via talos-generate-configs.sh).
    - GitOps skeleton lives under /srv/git/dozzly-network-home-cluster.
    - Re-run "sudo cloud-apply" after editing /etc/cloud/admin.env.
-
-
-
-: "${ADMIN_VM_IP:?set ADMIN_VM_IP in /etc/cloud/admin.env}"
-: "${CONTROL_VM_HOSTNAME:?set CONTROL_VM_HOSTNAME in /etc/cloud/admin.env}"
-: "${CONTROL_VM_IP:?set CONTROL_VM_IP in /etc/cloud/admin.env}"
-: "${CONTROL_VM_IFACE:?set CONTROL_VM_IFACE in /etc/cloud/admin.env}"
-: "${CONTROL_VM_ROLE:?set CONTROL_VM_ROLE in /etc/cloud/admin.env}"
-
-: "${NUC1_HOSTNAME:?set NUC1_HOSTNAME in /etc/cloud/admin.env}"
-: "${NUC1_IP:?set NUC1_IP in /etc/cloud/admin.env}"
-: "${NUC1_IFACE:?set NUC1_IFACE in /etc/cloud/admin.env}"
-: "${NUC2_HOSTNAME:?set NUC2_HOSTNAME in /etc/cloud/admin.env}"
-: "${NUC2_IP:?set NUC2_IP in /etc/cloud/admin.env}"
-: "${NUC2_IFACE:?set NUC2_IFACE in /etc/cloud/admin.env}"
-: "${GATEWAY:?set GATEWAY in /etc/cloud/admin.env}"
-: "${DNS1:?set DNS1 in /etc/cloud/admin.env}"
-: "${DNS2:?set DNS2 in /etc/cloud/admin.env}"
-
-
-
-
 
 
