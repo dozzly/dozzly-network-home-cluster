@@ -34,7 +34,7 @@ users:
   - name: matchbox
     system: true
     shell: /usr/sbin/nologin
-    home: /srv/matchbox
+    homedir: /srv/matchbox
 
 # --- 2) Packages we’ll need ---
 package_update: true
@@ -191,16 +191,18 @@ write_files:
       # Note: boot.ipxe.org/ipxe.efi is x86_64 UEFI
       curl -fsSL -o "$IPXE_DIR/ipxe_x86_64.efi" https://boot.ipxe.org/ipxe.efi
 
-      # ARM64 UEFI iPXE (build locally). Avoid VERSION* leaks; relax WERROR.
-      tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
-      git clone --depth 1 https://github.com/ipxe/ipxe.git "$tmp/ipxe"
-      env -u VERSION -u VERSION_MAJOR -u VERSION_MINOR -u VERSION_PATCH \
-        make -C "$tmp/ipxe/src" WERROR=0 -j"$(nproc)" bin-arm64-efi/snponly.efi bin-arm64-efi/ipxe.efi
-      install -m 0644 "$tmp/ipxe/src/bin-arm64-efi/snponly.efi" "$IPXE_DIR/snponly_arm64.efi"
-      install -m 0644 "$tmp/ipxe/src/bin-arm64-efi/ipxe.efi"     "$IPXE_DIR/ipxe_arm64.efi"
+      # ---------- ARM64 iPXE (download prebuilt) ----------
+      # These are official upstream builds.
+      curl -fsSL -o "$IPXE_DIR/snponly_arm64.efi" https://boot.ipxe.org/arm64-efi/snponly.efi
+      curl -fsSL -o "$IPXE_DIR/ipxe_arm64.efi"    https://boot.ipxe.org/arm64-efi/ipxe.efi
+      # ----------------------------------------------------
 
-      chown -R tftp:tftp "$TFTP_ROOT"
-      chmod 0644 "$IPXE_DIR"/* || true
+      install -m 0644 "$IPXE_DIR/snponly_arm64.efi" "$IPXE_DIR/snponly_arm64.efi"  # (kept for symmetry)
+      install -m 0644 "$IPXE_DIR/ipxe_arm64.efi"    "$IPXE_DIR/ipxe_arm64.efi"
+
+      # sanity
+      file "$IPXE_DIR/snponly_arm64.efi" "$IPXE_DIR/ipxe_arm64.efi" | grep -q 'AARCH64' || { echo "ARM64 iPXE not AARCH64"; exit 1; }
+
 
       # Sanity: confirm architectures
       file "$IPXE_DIR/ipxe_x86_64.efi" | grep -q 'x86-64' || { echo "ipxe_x86_64.efi not x86-64"; exit 1; }
@@ -1137,41 +1139,6 @@ runcmd:
       tar -xzf "$T/matchbox.tar.gz" -C "$T"
       install -m 0755 "$T/matchbox-${V}-linux-${GOARCH}/matchbox" /usr/local/bin/matchbox
     '
-
-  # iPXE / TFTP payloads (place binaries under /var/lib/tftpboot/ipxe)
-  - [ bash, -lc, "install -d -m 0755 /var/lib/tftpboot/ipxe" ]
-  - [ bash, -lc, "chown -R tftp:tftp /var/lib/tftpboot" ]
-
-  # Provide x86 BIOS chainloader (optional, harmless on ARM-only labs)
-  - [ bash, -lc, "curl -fsSL -o /var/lib/tftpboot/ipxe/undionly.kpxe https://boot.ipxe.org/undionly.kpxe || true" ]
-  - [ bash, -lc, "curl -fsSL -o /var/lib/tftpboot/ipxe/ipxe.efi https://boot.ipxe.org/ipxe.efi || true" ]
-  - [ bash, -lc, "curl -fsSL -o /var/lib/tftpboot/ipxe/snponly.efi https://boot.ipxe.org/snponly.efi || true" ]
-
-  # Build or fetch the correct UEFI binaries for this host arch
-  - |
-    bash -lc '
-      set -euo pipefail
-      ARCH="$(uname -m)"
-      TFTP=/var/lib/tftpboot/ipxe
-
-      if [[ "$ARCH" = "aarch64" || "$ARCH" = "arm64" ]]; then
-        # Build ARM64 UEFI iPXE locally (most reliable)
-        apt-get update -y
-        apt-get install -y --no-install-recommends build-essential git liblzma-dev mtools xz-utils uuid-dev
-        tmp="$(mktemp -d)"; trap "rm -rf \"$tmp\"" EXIT
-        git clone --depth 1 https://github.com/ipxe/ipxe.git "$tmp/ipxe"
-        make -C "$tmp/ipxe/src" -j"$(nproc)" bin-arm64-efi/snponly.efi bin-arm64-efi/ipxe.efi
-        install -m 0644 "$tmp/ipxe/src/bin-arm64-efi/snponly.efi" "$TFTP/snponly_arm64.efi"
-        install -m 0644 "$tmp/ipxe/src/bin-arm64-efi/ipxe.efi"     "$TFTP/ipxe_arm64.efi"
-      else
-        # On AMD64 hosts you might want x86_64 UEFI too (for x86 clients)
-        curl -fsSL -o "$TFTP/ipxe_x86_64.efi" https://boot.ipxe.org/ipxe.efi || true
-        # (snponly_x86_64.efi is not directly published; build if needed)
-      fi
-      chown -R tftp:tftp /var/lib/tftpboot
-      chmod 0644 /var/lib/tftpboot/ipxe/* || true
-    '
-
 
   # kubectl (latest stable) and talosctl
   - |
