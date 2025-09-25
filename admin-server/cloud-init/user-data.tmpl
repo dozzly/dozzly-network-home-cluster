@@ -1069,7 +1069,6 @@ write_files:
       }
 
       ensure_keys() {
-        # Always use a single, system-wide location
         mkdir -p "$SOPS_KEYS_DIR_SYSTEM"
         chmod 700 "$SOPS_KEYS_DIR_SYSTEM"
 
@@ -1080,25 +1079,26 @@ write_files:
           log "Could not obtain lock on $lock"; exit 1
         fi
 
-        # Create if missing or clearly invalid
+        # Cleanup trap must tolerate set -u
+        local tmpdir=""; local tmpfile=""
+        trap '[[ -n "${tmpdir:-}" ]] && rm -rf "$tmpdir"' RETURN
+
         if [[ ! -f "$SOPS_KEYS_FILE_SYSTEM" ]] || ! grep -q 'AGE-SECRET-KEY-' "$SOPS_KEYS_FILE_SYSTEM"; then
           log "Generating age keypair at $SOPS_KEYS_FILE_SYSTEM"
           umask 077
-          local tmp
-          tmp="$(mktemp)"
-          # Generate to a temp file then move atomically
-          age-keygen -o "$tmp"
-          mv -f "$tmp" "$SOPS_KEYS_FILE_SYSTEM"
+          tmpdir="$(mktemp -d)"
+          tmpfile="$tmpdir/keys.txt"
+          age-keygen -o "$tmpfile"
+          install -m 600 "$tmpfile" "$SOPS_KEYS_FILE_SYSTEM"
         else
           log "age key exists at $SOPS_KEYS_FILE_SYSTEM (keeping)"
         fi
+
         chmod 600 "$SOPS_KEYS_FILE_SYSTEM"
 
-        # Ensure the per-user default path points at the system key (nice-to-have)
+        # Optional: symlink per-user default to the system key
         mkdir -p "$HOME/.config/sops/age"
-        if [[ "$HOME/.config/sops/age/keys.txt" != "$SOPS_KEYS_FILE_SYSTEM" ]]; then
-          ln -sf "$SOPS_KEYS_FILE_SYSTEM" "$HOME/.config/sops/age/keys.txt" || true
-        fi
+        ln -sf "$SOPS_KEYS_FILE_SYSTEM" "$HOME/.config/sops/age/keys.txt" || true
       }
 
       get_recipient() {
