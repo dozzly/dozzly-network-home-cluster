@@ -182,31 +182,40 @@ write_files:
       TFTP_ROOT=/var/lib/tftpboot
       IPXE_DIR="$TFTP_ROOT/ipxe"
       install -d -m 0755 "$IPXE_DIR"
-      chown -R tftp:tftp "$TFTP_ROOT"
 
-      # x86 BIOS PXE (optional)
-      curl -fsSL -o "$IPXE_DIR/undionly.kpxe" https://boot.ipxe.org/undionly.kpxe || true
+      # x86 BIOS PXE (optional; ignore failure)
+      curl --fail --location -fsS --retry 3 -o "$IPXE_DIR/undionly.kpxe" https://boot.ipxe.org/undionly.kpxe || true
 
       # x86_64 UEFI iPXE (prebuilt)
-      # Note: boot.ipxe.org/ipxe.efi is x86_64 UEFI
-      curl -fsSL -o "$IPXE_DIR/ipxe_x86_64.efi" https://boot.ipxe.org/ipxe.efi
+      curl --fail --location -fsS --retry 3 -o "$IPXE_DIR/ipxe_x86_64.efi" https://boot.ipxe.org/ipxe.efi
 
-      # ---------- ARM64 iPXE (download prebuilt) ----------
-      # These are official upstream builds.
-      curl -fsSL -o "$IPXE_DIR/snponly_arm64.efi" https://boot.ipxe.org/arm64-efi/snponly.efi
-      curl -fsSL -o "$IPXE_DIR/ipxe_arm64.efi"    https://boot.ipxe.org/arm64-efi/ipxe.efi
-      # ----------------------------------------------------
+      # ARM64 UEFI iPXE (prebuilt)
+      curl --fail --location -fsS --retry 3 -o "$IPXE_DIR/snponly_arm64.efi" https://boot.ipxe.org/arm64-efi/snponly.efi
+      curl --fail --location -fsS --retry 3 -o "$IPXE_DIR/ipxe_arm64.efi"    https://boot.ipxe.org/arm64-efi/ipxe.efi
 
-      install -m 0644 "$IPXE_DIR/snponly_arm64.efi" "$IPXE_DIR/snponly_arm64.efi"  # (kept for symmetry)
-      install -m 0644 "$IPXE_DIR/ipxe_arm64.efi"    "$IPXE_DIR/ipxe_arm64.efi"
+      # Set ownership/perms after downloads
+      chown -R tftp:tftp "$TFTP_ROOT"
+      chmod 0644 "$IPXE_DIR"/ipxe_x86_64.efi "$IPXE_DIR"/snponly_arm64.efi "$IPXE_DIR"/ipxe_arm64.efi 2>/dev/null || true
+      chmod 0644 "$IPXE_DIR"/undionly.kpxe 2>/dev/null || true
 
-      # sanity
-      file "$IPXE_DIR/snponly_arm64.efi" "$IPXE_DIR/ipxe_arm64.efi" | grep -q 'AARCH64' || { echo "ARM64 iPXE not AARCH64"; exit 1; }
+      # --- Sanity: confirm architectures (case-insensitive, robust) ---
+      x86_info="$(file -b "$IPXE_DIR/ipxe_x86_64.efi" || true)"
+      arm_info_snponly="$(file -b "$IPXE_DIR/snponly_arm64.efi" || true)"
+      arm_info_ipxe="$(file -b "$IPXE_DIR/ipxe_arm64.efi" || true)"
 
+      echo "[ipxe] x86_64: $x86_info"
+      echo "[ipxe] arm64 snp: $arm_info_snponly"
+      echo "[ipxe] arm64 ipxe: $arm_info_ipxe"
 
-      # Sanity: confirm architectures
-      file "$IPXE_DIR/ipxe_x86_64.efi" | grep -q 'x86-64' || { echo "ipxe_x86_64.efi not x86-64"; exit 1; }
-      file "$IPXE_DIR/snponly_arm64.efi" "$IPXE_DIR/ipxe_arm64.efi" | grep -q 'AARCH64' || { echo "ARM64 iPXE not AARCH64"; exit 1; }
+      echo "$x86_info" | grep -qiE 'x86-64|x86_64|PE32\+ executable.*EFI' \
+        || { echo "ipxe_x86_64.efi not x86-64?"; exit 1; }
+
+      echo "$arm_info_snponly" | grep -qiE 'aarch64|arm64' \
+        || { echo "snponly_arm64.efi not aarch64?"; exit 1; }
+
+      echo "$arm_info_ipxe" | grep -qiE 'aarch64|arm64' \
+        || { echo "ipxe_arm64.efi not aarch64?"; exit 1; }
+      # ---------------------------------------------------------------
 
       # ---------- dnsmasq ProxyDHCP ----------
       cat >/etc/dnsmasq.d/pxe.conf <<EOF
@@ -433,6 +442,7 @@ write_files:
       set -euo pipefail
       source /etc/cloud/admin.env
 
+      # Fast exit if not configured
       if [[ -z "${BACKUP_MOUNT:-}" || -z "${BACKUP_FSTYPE:-}" ]]; then
         echo "[minio] BACKUP_MOUNT/BACKUP_FSTYPE not set; skipping."
         exit 0
@@ -440,22 +450,49 @@ write_files:
 
       mkdir -p "${BACKUP_MOUNT}"
 
+      # If a UUID is provided, ensure it’s in fstab and mount
       if [[ -n "${BACKUP_UUID:-}" ]]; then
         if ! grep -q "${BACKUP_UUID}" /etc/fstab; then
           echo "UUID=${BACKUP_UUID} ${BACKUP_MOUNT} ${BACKUP_FSTYPE} noatime,nofail 0 2" >> /etc/fstab
         fi
         mount -a || true
       else
-        echo "[minio] No BACKUP_UUID yet; will still install binaries but not enable service."
+        echo "[minio] No BACKUP_UUID yet; will install binaries but not enable service."
       fi
 
-      # Install server + client if missing
-      if ! command -v minio >/dev/null 2>&1; then
-        curl -fsSL https://dl.min.io/server/minio/release/linux-amd64/minio -o /usr/local/bin/minio
+      # --- choose correct binaries for host arch ---
+      case "$(uname -m)" in
+        x86_64|amd64) MINIO_ARCH=linux-amd64 ;;
+        aarch64|arm64) MINIO_ARCH=linux-arm64 ;;
+        *) echo "[minio] unsupported arch: $(uname -m)"; exit 0 ;;
+      esac
+
+      # Helper for reliable downloads
+      dl() { curl --fail --location -fsS --retry 3 --connect-timeout 10 --max-time 120 -o "$1" "$2"; }
+
+      # Install server + client if missing (or wrong arch)
+      need_minio=true
+      if command -v minio >/dev/null 2>&1; then
+        # quick arch sanity: file(1) shows the target arch
+        if file "$(command -v minio)" | grep -qiE '(aarch64|arm64|x86-64)'; then
+          need_minio=false
+        fi
+      fi
+      if $need_minio; then
+        echo "[minio] installing server for ${MINIO_ARCH}"
+        dl /usr/local/bin/minio "https://dl.min.io/server/minio/release/${MINIO_ARCH}/minio"
         chmod +x /usr/local/bin/minio
       fi
-      if ! command -v mc >/dev/null 2>&1; then
-        curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o /usr/local/bin/mc
+
+      need_mc=true
+      if command -v mc >/dev/null 2>&1; then
+        if file "$(command -v mc)" | grep -qiE '(aarch64|arm64|x86-64)'; then
+          need_mc=false
+        fi
+      fi
+      if $need_mc; then
+        echo "[minio] installing client for ${MINIO_ARCH}"
+        dl /usr/local/bin/mc "https://dl.min.io/client/mc/release/${MINIO_ARCH}/mc"
         chmod +x /usr/local/bin/mc
       fi
 
@@ -489,13 +526,14 @@ write_files:
 
       systemctl daemon-reload
 
-      # Only start/enable if the mount exists (UUID provided and mounted)
+      # Only start/enable if the mount exists
       if mountpoint -q "${BACKUP_MOUNT}"; then
         mkdir -p "${BACKUP_MOUNT}/minio-data"
         systemctl enable --now minio
-        # configure buckets (idempotent)
+        # health check with timeout
         for i in {1..30}; do
-          curl -fsS "http://127.0.0.1:${MINIO_PORT}/minio/health/ready" && break || sleep 2
+          if curl -fsS --connect-timeout 2 "http://127.0.0.1:${MINIO_PORT}/minio/health/ready" >/dev/null; then break; fi
+          sleep 2
         done
         mc alias set local "http://127.0.0.1:${MINIO_PORT}" "${MINIO_ROOT_USER}" "${MINIO_ROOT_PASSWORD}" || true
         mc mb -p "local/${MINIO_BUCKET_LONGHORN}" || true
@@ -832,16 +870,27 @@ write_files:
       #!/usr/bin/env bash
       set -Eeuo pipefail
 
+      # Load admin config (like setup-pxe.sh does)
+      if [[ -f /etc/cloud/admin.env ]]; then
+        # shellcheck disable=SC1091
+        . /etc/cloud/admin.env
+      else
+        echo "[matchbox] /etc/cloud/admin.env missing; aborting" >&2
+        exit 1
+      fi
+
       : "${MATCHBOX_DIR:=/srv/matchbox}"
       : "${MATCHBOX_HTTP_PORT:=8080}"
-      : "${ADMIN_VM_IP:?set ADMIN_VM_IP in /etc/cloud/admin.env}"
-      : "${TALOS_VERSION:?set TALOS_VERSION in /etc/cloud/admin.env (e.g., v1.7.0)}"
-      : "${CONTROL_VM_MAC:?set CONTROL_VM_MAC in /etc/cloud/admin.env}"
-      : "${NUC1_MAC:?set NUC1_MAC in /etc/cloud/admin.env}"
-      : "${NUC2_MAC:?set NUC2_MAC in /etc/cloud/admin.env}"
-      : "${CONTROL_VM_HOSTNAME:?set CONTROL_VM_HOSTNAME in /etc/cloud/admin.env}"
-      : "${NUC1_HOSTNAME:?set NUC1_HOSTNAME in /etc/cloud/admin.env}"
-      : "${NUC2_HOSTNAME:?set NUC2_HOSTNAME in /etc/cloud/admin.env}"
+
+      # Required vars (fail fast with clear messages)
+      : "${ADMIN_VM_IP:?Set ADMIN_VM_IP in /etc/cloud/admin.env}"
+      : "${TALOS_VERSION:?Set TALOS_VERSION in /etc/cloud/admin.env (e.g., v1.7.0)}"
+      : "${CONTROL_VM_MAC:?Set CONTROL_VM_MAC in /etc/cloud/admin.env}"
+      : "${NUC1_MAC:?Set NUC1_MAC in /etc/cloud/admin.env}"
+      : "${NUC2_MAC:?Set NUC2_MAC in /etc/cloud/admin.env}"
+      : "${CONTROL_VM_HOSTNAME:?Set CONTROL_VM_HOSTNAME in /etc/cloud/admin.env}"
+      : "${NUC1_HOSTNAME:?Set NUC1_HOSTNAME in /etc/cloud/admin.env}"
+      : "${NUC2_HOSTNAME:?Set NUC2_HOSTNAME in /etc/cloud/admin.env}"
 
       profiles_dir="$MATCHBOX_DIR/profiles"
       groups_dir="$MATCHBOX_DIR/groups"
@@ -944,11 +993,11 @@ write_files:
       run /usr/local/sbin/setup-pxe.sh
       run /usr/local/bin/install-flux-cli.sh
       run /usr/local/bin/minio-setup.sh
+      run /usr/local/bin/sops-setup.sh
       run /usr/local/bin/gitops-skeleton.sh
       run /usr/local/bin/flux-generate-key.sh
       run /usr/local/bin/talos-generate-configs.sh
       run /usr/local/bin/matchbox-publish-configs.sh
-      run /usr/local/bin/matchbox-write-cp-profile-and-groups.sh
 
       # after
       set -a
@@ -975,6 +1024,14 @@ write_files:
       : "${FLUX_NAMESPACE:=flux-system}"
       : "${APT_INSTALL:=yes}"
       : "${SKIP_SOPS_GEN:=0}"            # 1 = skip key gen and .sops.yaml changes entirely
+
+      # --- put near the top, after your defaults ---
+      : "${SOPS_KEYS_DIR_SYSTEM:=/etc/sops/age}"
+      : "${SOPS_KEYS_FILE_SYSTEM:=${SOPS_KEYS_DIR_SYSTEM}/keys.txt}"
+
+      # keep old env vars for compatibility; default them to the system path
+      : "${SOPS_KEYS_DIR:=$SOPS_KEYS_DIR_SYSTEM}"
+      : "${SOPS_KEYS_FILE:=$SOPS_KEYS_FILE_SYSTEM}"
 
       log(){ echo "[$(date -Is)] $*"; }
       have(){ command -v "$1" >/dev/null 2>&1; }
@@ -1012,23 +1069,45 @@ write_files:
       }
 
       ensure_keys() {
-        mkdir -p "$SOPS_KEYS_DIR"
-        chmod 700 "$SOPS_KEYS_DIR"
-        if [[ -s "$SOPS_KEYS_FILE" ]]; then
-          log "age key exists at $SOPS_KEYS_FILE (keeping)"
-        else
-          log "Generating new age keypair at $SOPS_KEYS_FILE"
-          umask 077
-          age-keygen -o "$SOPS_KEYS_FILE"
+        # Always use a single, system-wide location
+        mkdir -p "$SOPS_KEYS_DIR_SYSTEM"
+        chmod 700 "$SOPS_KEYS_DIR_SYSTEM"
+
+        # Prevent concurrent clobbering
+        local lock="${SOPS_KEYS_FILE_SYSTEM}.lock"
+        exec 9>"$lock"
+        if ! flock -w 15 9; then
+          log "Could not obtain lock on $lock"; exit 1
         fi
-        chmod 600 "$SOPS_KEYS_FILE"
+
+        # Create if missing or clearly invalid
+        if [[ ! -f "$SOPS_KEYS_FILE_SYSTEM" ]] || ! grep -q 'AGE-SECRET-KEY-' "$SOPS_KEYS_FILE_SYSTEM"; then
+          log "Generating age keypair at $SOPS_KEYS_FILE_SYSTEM"
+          umask 077
+          local tmp
+          tmp="$(mktemp)"
+          # Generate to a temp file then move atomically
+          age-keygen -o "$tmp"
+          mv -f "$tmp" "$SOPS_KEYS_FILE_SYSTEM"
+        else
+          log "age key exists at $SOPS_KEYS_FILE_SYSTEM (keeping)"
+        fi
+        chmod 600 "$SOPS_KEYS_FILE_SYSTEM"
+
+        # Ensure the per-user default path points at the system key (nice-to-have)
+        mkdir -p "$HOME/.config/sops/age"
+        if [[ "$HOME/.config/sops/age/keys.txt" != "$SOPS_KEYS_FILE_SYSTEM" ]]; then
+          ln -sf "$SOPS_KEYS_FILE_SYSTEM" "$HOME/.config/sops/age/keys.txt" || true
+        fi
       }
 
       get_recipient() {
+        # Stronger and format-proof: derive from private key
+        # age-keygen -y prints the public key (recipient) for the given identity
         if [[ -n "$SOPS_RECIPIENT" ]]; then
           echo "$SOPS_RECIPIENT"; return
         fi
-        awk '/^# public key:/{print $4; exit}' "$SOPS_KEYS_FILE"
+        age-keygen -y "$SOPS_KEYS_FILE_SYSTEM" 2>/dev/null | awk 'NF{print; exit}'
       }
 
       write_sops_yaml() {
@@ -1038,7 +1117,6 @@ write_files:
         file="$GITOPS_DIR/.sops.yaml"
         mkdir -p "$GITOPS_DIR"
 
-        # If missing -> create once
         if [[ ! -f "$file" ]]; then
           cat > "$file" <<YAML
       # Auto-generated by sops-setup.sh (first run). Edit carefully.
@@ -1055,15 +1133,14 @@ write_files:
           return
         fi
 
-        # If exists -> append our recipient if missing; otherwise do nothing
-        if grep -q "$recip" "$file"; then
+        if grep -q -F "$recip" "$file"; then
           log "$file already contains recipient; leaving unchanged"
         else
           log "Appending recipient to $file"
           tmp="$(mktemp)"
           awk -v R="${recip}" '
             {print}
-            # if a line like "age: [ ... ]" exists, append there (first match only)
+            # If an "age: [ ... ]" exists, append there (first match only)
             $1 ~ /^age:/ && index($0,"[") && !done {
               sub(/\]/,", \"" R "\"]")
               done=1
@@ -1080,8 +1157,9 @@ write_files:
       create_flux_secret() {
         if ! have kubectl; then log "kubectl not found; skipping Flux sops-age secret"; return; fi
         if ! kubectl version --short >/dev/null 2>&1; then log "Kubernetes not reachable; skipping Flux sops-age secret"; return; fi
+        # Always use the system key file
         kubectl -n "$FLUX_NAMESPACE" create secret generic sops-age \
-          --from-file=age.agekey="$SOPS_KEYS_FILE" \
+          --from-file=age.agekey="$SOPS_KEYS_FILE_SYSTEM" \
           --dry-run=client -o yaml | kubectl apply -f -
         log "Ensured Secret ${FLUX_NAMESPACE}/sops-age"
       }
