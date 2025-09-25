@@ -1,7 +1,7 @@
 creation_rules:
   - path_regex: '(.*/)?secret(\.sops)?\.(ya?ml)$'
     encrypted_regex: '^(data|stringData)$'
-    age: 'age15uy6872evl2adrpsnr4tcelzstf4mqt3lrcu958w4cvvyxqzfg2q52tjcg'
+    age: ['age15uy6872evl2adrpsnr4tcelzstf4mqt3lrcu958w4cvvyxqzfg2q52tjcg']
   - path_regex: '(^|.*/)secrets/.*\.(ya?ml)$'
     encrypted_regex: '^(data|stringData)$'
-    age: 'age15uy6872evl2adrpsnr4tcelzstf4mqt3lrcu958w4cvvyxqzfg2q52tjcg'
+    age: ['age15uy6872evl2adrpsnr4tcelzstf4mqt3lrcu958w4cvvyxqzfg2q52tjcg']
