@@ -295,7 +295,6 @@ write_files:
       ExecStartPre=/usr/bin/test -d /srv/matchbox/assets
       ExecStart=/usr/local/bin/matchbox \
         -address=0.0.0.0:8080 \
-        -rpc-address=0.0.0.0:8081 \
         -data-path=/srv/matchbox \
         -assets-path=/srv/matchbox/assets \
         -log-level=debug
@@ -379,7 +378,7 @@ write_files:
       CONTROL_VM_IP="192.168.1.155"
       CONTROL_VM_HOSTNAME="warner"
       CONTROL_VM_IFACE=enp1s0
-      CONTROL_VM_MAC="AA:BB:CC:DD:EE:03"
+      CONTROL_VM_MAC="5A:F8:9C:CD:D0:48"
       CONTROL_VM_ROLE=control
 
       NUC1_HOSTNAME="goldstone"
@@ -1479,7 +1478,7 @@ runcmd:
   - [ bash, -lc, "sudo -u ${admin_user} bash -lc '/usr/local/bin/krew-install.sh' || true" ]
 
   # Firewall (optional)
-  - [ bash, -lc, "ufw allow OpenSSH; ufw allow http; ufw allow 69/udp; ufw allow 67/udp; ufw allow 6443/tcp; ufw --force enable" ]
+  - [ bash, -lc, "ufw allow OpenSSH; ufw allow http; ufw allow 69/udp; ufw allow 67/udp; ufw allow 6443/tcp; ufw allow 8080/tcp; ufw --force enable" ]
 
   # Ensure .bashrc loads .bashrc.d snippets
   - [ bash, -lc, 'grep -q bashrc.d "/home/${admin_user}/.bashrc" 2>/dev/null || printf "%s\n" "# Load per-snippet bashrc.d files if present" "if [ -d \"$HOME/.bashrc.d\" ]; then" "  for f in \"$HOME/.bashrc.d/\"*.sh; do [ -r \"$f\" ] && . \"$f\"; done" "fi" >> "/home/${admin_user}/.bashrc"' ]
