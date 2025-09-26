@@ -832,25 +832,43 @@ write_files:
     content: |
       #!/usr/bin/env bash
       set -euo pipefail
+
+      # Load env
       source /etc/cloud/admin.env
 
-      [[ -z "${CLUSTER_NAME:-}" || -z "${VIP_API_IP:-}" ]] && { echo "[talos] CLUSTER_NAME/VIP_API_IP not set; skipping."; exit 0; }
+      : "${CLUSTER_NAME:?Set in /etc/cloud/admin.env}"
+      : "${VIP_API_IP:?Set in /etc/cloud/admin.env}"
+      : "${TALOS_OUT_DIR:=/srv/talos}"
 
-      mkdir -p "$TALOS_OUT_DIR"
       ENDPOINT="https://${VIP_API_IP}:6443"
+      mkdir -p "$TALOS_OUT_DIR"
 
-      # Only (re)generate if missing or forced
-      if [[ ! -f "$TALOS_OUT_DIR/controlplane.yaml" || ! -f "$TALOS_OUT_DIR/worker.yaml" ]]; then
-        echo "[talos] generating machine configs for $CLUSTER_NAME ($ENDPOINT)"
+      # Subnet prefix length (default /24 unless overridden in admin.env)
+      : "${SUBNET_PREFIX:=24}"
 
-        # If you want deterministic cluster secrets, set TALOS_SECRETS_FILE or we’ll create one.
+      # DNS config (optional)
+      DNS_LIST=()
+      [[ -n "${DNS1:-}" ]] && DNS_LIST+=("\"${DNS1}\"")
+      [[ -n "${DNS2:-}" ]] && DNS_LIST+=("\"${DNS2}\"")
+      DNS_JSON=$(IFS=,; echo "${DNS_LIST[*]:-}")
+
+      # Respect force regen
+      regen_needed="no"
+      if [[ "${TALOS_FORCE_REGEN:-no}" == "yes" ]]; then
+        regen_needed="yes"
+      elif [[ ! -f "$TALOS_OUT_DIR/controlplane.yaml" || ! -f "$TALOS_OUT_DIR/worker.yaml" ]]; then
+        regen_needed="yes"
+      fi
+
+      if [[ "$regen_needed" == "yes" ]]; then
+        echo "[talos] generating base machine configs for ${CLUSTER_NAME} (${ENDPOINT})"
+
         if [[ -n "${TALOS_SECRETS_FILE:-}" ]]; then
           [[ -f "$TALOS_SECRETS_FILE" ]] || { echo "[talos] TALOS_SECRETS_FILE not found: $TALOS_SECRETS_FILE"; exit 1; }
           talosctl gen config "$CLUSTER_NAME" "$ENDPOINT" \
             --with-secrets "$TALOS_SECRETS_FILE" \
             --output "$TALOS_OUT_DIR"
         else
-          # create (or reuse) a secrets file in the output dir
           SECRETS="$TALOS_OUT_DIR/secrets.yaml"
           [[ -f "$SECRETS" ]] || talosctl gen secrets --output-file "$SECRETS"
           talosctl gen config "$CLUSTER_NAME" "$ENDPOINT" \
@@ -858,8 +876,92 @@ write_files:
             --output "$TALOS_OUT_DIR"
         fi
       else
-        echo "[talos] configs already exist in $TALOS_OUT_DIR (skipping gen)"
+        echo "[talos] base configs already exist in $TALOS_OUT_DIR (skipping gen)"
       fi
+
+      base_cp="$TALOS_OUT_DIR/controlplane.yaml"
+      [[ -f "$base_cp" ]] || { echo "[talos] missing $base_cp"; exit 1; }
+
+      # Helper: patch a base control-plane config into a per-node config
+      mk_control_cfg() {
+        local HOST="$1" IP="$2" IFACE="$3"
+        local OUT="$TALOS_OUT_DIR/controlplane-${HOST}.yaml"
+
+        # JSON6902 patch: hostname + static IP + default route + optional DNS + workloads on CPs + systemExtensions
+        cat >"$TALOS_OUT_DIR/.patch-${HOST}.json" <<'JSON'
+      [
+        {"op":"add","path":"/machine/network/hostname","value":"__HOST__"},
+        {"op":"add","path":"/machine/network/interfaces","value":[
+          {
+            "interface":"__IFACE__",
+            "addresses":["__IP__/__PFX__"],
+            "routes":[{"network":"0.0.0.0/0","gateway":"__GW__"}],
+            "dhcp": false
+          }
+        ]},
+        {"op":"add","path":"/cluster/allowSchedulingOnControlPlanes","value":true},
+        {"op":"add","path":"/machine/systemExtensions","value":{
+          "officialExtensions":[
+            "ghcr.io/siderolabs/iscsi-tools",
+            "ghcr.io/siderolabs/nfs-utils"
+          ]
+        }}
+      ]
+      JSON
+
+        # Substitute placeholders
+        sed -i \
+          -e "s|__HOST__|${HOST}|g" \
+          -e "s|__IFACE__|${IFACE}|g" \
+          -e "s|__IP__|${IP}|g" \
+          -e "s|__PFX__|${SUBNET_PREFIX}|g" \
+          -e "s|__GW__|${GATEWAY}|g" \
+          "$TALOS_OUT_DIR/.patch-${HOST}.json"
+
+        # Apply optional DNS patch
+        if [[ -n "$DNS_JSON" ]]; then
+          cat >"$TALOS_OUT_DIR/.patch-${HOST}-dns.json" <<JSON
+      [
+        {"op":"add","path":"/machine/network/nameservers","value":[${DNS_JSON}]}
+      ]
+      JSON
+          talosctl machineconfig patch "$base_cp" \
+            --patch "@$TALOS_OUT_DIR/.patch-${HOST}.json" \
+            --patch "@$TALOS_OUT_DIR/.patch-${HOST}-dns.json" \
+            > "$OUT"
+        else
+          talosctl machineconfig patch "$base_cp" \
+            --patch "@$TALOS_OUT_DIR/.patch-${HOST}.json" \
+            > "$OUT"
+        fi
+
+        echo "  wrote $OUT"
+      }
+
+      echo "[talos] creating per-node control-plane configs"
+
+      # CONTROL VM
+      : "${CONTROL_VM_HOSTNAME:?}"
+      : "${CONTROL_VM_IP:?}"
+      : "${CONTROL_VM_IFACE:?}"
+      mk_control_cfg "$CONTROL_VM_HOSTNAME" "$CONTROL_VM_IP" "$CONTROL_VM_IFACE"
+
+      # NUC1
+      : "${NUC1_HOSTNAME:?}"
+      : "${NUC1_IP:?}"
+      : "${NUC1_IFACE:?}"
+      mk_control_cfg "$NUC1_HOSTNAME" "$NUC1_IP" "$NUC1_IFACE"
+
+      # NUC2
+      : "${NUC2_HOSTNAME:?}"
+      : "${NUC2_IP:?}"
+      : "${NUC2_IFACE:?}"
+      mk_control_cfg "$NUC2_HOSTNAME" "$NUC2_IP" "$NUC2_IFACE"
+
+      # Cleanup temp patches
+      rm -f "$TALOS_OUT_DIR"/.patch-*.json
+
+      echo "[talos] done."
 
   # -------- Matchbox Configuration Publish --------
   
@@ -870,7 +972,7 @@ write_files:
       #!/usr/bin/env bash
       set -Eeuo pipefail
 
-      # Load admin config (like setup-pxe.sh does)
+      # Load admin config
       if [[ -f /etc/cloud/admin.env ]]; then
         # shellcheck disable=SC1091
         . /etc/cloud/admin.env
@@ -881,25 +983,37 @@ write_files:
 
       : "${MATCHBOX_DIR:=/srv/matchbox}"
       : "${MATCHBOX_HTTP_PORT:=8080}"
+      : "${TALOS_OUT_DIR:=/srv/talos}"
 
-      # Required vars (fail fast with clear messages)
-      : "${ADMIN_VM_IP:?Set ADMIN_VM_IP in /etc/cloud/admin.env}"
-      : "${TALOS_VERSION:?Set TALOS_VERSION in /etc/cloud/admin.env (e.g., v1.7.0)}"
-      : "${CONTROL_VM_MAC:?Set CONTROL_VM_MAC in /etc/cloud/admin.env}"
-      : "${NUC1_MAC:?Set NUC1_MAC in /etc/cloud/admin.env}"
-      : "${NUC2_MAC:?Set NUC2_MAC in /etc/cloud/admin.env}"
-      : "${CONTROL_VM_HOSTNAME:?Set CONTROL_VM_HOSTNAME in /etc/cloud/admin.env}"
-      : "${NUC1_HOSTNAME:?Set NUC1_HOSTNAME in /etc/cloud/admin.env}"
-      : "${NUC2_HOSTNAME:?Set NUC2_HOSTNAME in /etc/cloud/admin.env}"
+      # Required vars
+      : "${ADMIN_VM_IP:?Set ADMIN_VM_IP}"
+      : "${TALOS_VERSION:?Set TALOS_VERSION (e.g. v1.11.1)}"
+
+      : "${CONTROL_VM_MAC:?Set CONTROL_VM_MAC}"
+      : "${NUC1_MAC:?Set NUC1_MAC}"
+      : "${NUC2_MAC:?Set NUC2_MAC}"
+
+      : "${CONTROL_VM_HOSTNAME:?Set CONTROL_VM_HOSTNAME}"
+      : "${NUC1_HOSTNAME:?Set NUC1_HOSTNAME}"
+      : "${NUC2_HOSTNAME:?Set NUC2_HOSTNAME}"
 
       profiles_dir="$MATCHBOX_DIR/profiles"
       groups_dir="$MATCHBOX_DIR/groups"
+      configs_dir="$MATCHBOX_DIR/configs"
 
       upper(){ tr '[:lower:]' '[:upper:]'; }
 
-      install -d -m 0755 "$profiles_dir" "$groups_dir"
+      install -d -m 0755 "$profiles_dir" "$groups_dir" "$configs_dir"
 
-      # 1) Write the reusable control-plane profile (uses per-node filename via {{.config}})
+      # 0) Copy/refresh the per-node configs into matchbox/configs
+      for H in "$CONTROL_VM_HOSTNAME" "$NUC1_HOSTNAME" "$NUC2_HOSTNAME"; do
+        src="$TALOS_OUT_DIR/controlplane-${H}.yaml"
+        dst="$configs_dir/controlplane-${H}.yaml"
+        [[ -f "$src" ]] || { echo "[matchbox] missing $src — run talos-generate-configs.sh first"; exit 1; }
+        install -m 0644 "$src" "$dst"
+      done
+
+      # 1) Control-plane profile (reusable)
       cat > "$profiles_dir/talos-controlplane.json" <<JSON
       {
         "id": "talos-controlplane",
@@ -918,7 +1032,7 @@ write_files:
       }
       JSON
 
-      # 2) Three per-node groups (control-planes), each points to its config file
+      # 2) Per-node groups (selectors by MAC, payload chooses per-node config)
       cvm_mac_uc="$(printf '%s' "$CONTROL_VM_MAC" | upper)"
       nuc1_mac_uc="$(printf '%s' "$NUC1_MAC" | upper)"
       nuc2_mac_uc="$(printf '%s' "$NUC2_MAC" | upper)"
@@ -958,9 +1072,10 @@ write_files:
       echo "  $groups_dir/${CONTROL_VM_HOSTNAME}.json"
       echo "  $groups_dir/${NUC1_HOSTNAME}.json"
       echo "  $groups_dir/${NUC2_HOSTNAME}.json"
+      echo "  $configs_dir/controlplane-*.yaml"
 
-      # Optional: nudge matchbox if running under systemd (it hot-reads JSON, so this is not required)
-      if systemctl is-active --quiet matchbox 2>/dev/null; then
+      # Optional: nudge matchbox (it hot-reads JSON anyway)
+      if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet matchbox 2>/dev/null; then
         systemctl reload-or-restart matchbox || true
       fi
 
