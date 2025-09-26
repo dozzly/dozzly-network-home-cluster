@@ -984,28 +984,90 @@ write_files:
       : "${MATCHBOX_DIR:=/srv/matchbox}"
       : "${MATCHBOX_HTTP_PORT:=8080}"
       : "${TALOS_OUT_DIR:=/srv/talos}"
-
-      # Required vars
       : "${ADMIN_VM_IP:?Set ADMIN_VM_IP}"
       : "${TALOS_VERSION:?Set TALOS_VERSION (e.g. v1.11.1)}"
-
-      : "${CONTROL_VM_MAC:?Set CONTROL_VM_MAC}"
-      : "${NUC1_MAC:?Set NUC1_MAC}"
-      : "${NUC2_MAC:?Set NUC2_MAC}"
 
       : "${CONTROL_VM_HOSTNAME:?Set CONTROL_VM_HOSTNAME}"
       : "${NUC1_HOSTNAME:?Set NUC1_HOSTNAME}"
       : "${NUC2_HOSTNAME:?Set NUC2_HOSTNAME}"
+      : "${CONTROL_VM_MAC:?Set CONTROL_VM_MAC}"
+      : "${NUC1_MAC:?Set NUC1_MAC}"
+      : "${NUC2_MAC:?Set NUC2_MAC}"
+
+      # Per-node arch (defaults)
+      : "${CONTROL_ARCH:=amd64}"
+      : "${NUC1_ARCH:=amd64}"
+      : "${NUC2_ARCH:=amd64}"
+
+      # Default asset locations (HTTP-served by matchbox)
+      : "${TALOS_KERNEL_AMD64:=/srv/matchbox/assets/talos/${TALOS_VERSION}/amd64/vmlinuz}"
+      : "${TALOS_INITRD_AMD64:=/srv/matchbox/assets/talos/${TALOS_VERSION}/amd64/initramfs.xz}"
+      : "${TALOS_KERNEL_ARM64:=/srv/matchbox/assets/talos/${TALOS_VERSION}/arm64/vmlinuz}"
+      : "${TALOS_INITRD_ARM64:=/srv/matchbox/assets/talos/${TALOS_VERSION}/arm64/initramfs.xz}"
+
+      # Where to fetch releases from (two common patterns; we’ll try both)
+      : "${TALOS_RELEASE_BASE_1:=https://github.com/siderolabs/talos/releases/download/${TALOS_VERSION}}"
+      : "${TALOS_RELEASE_BASE_2:=https://github.com/siderolabs/talos/releases/download/${TALOS_VERSION}}"
 
       profiles_dir="$MATCHBOX_DIR/profiles"
       groups_dir="$MATCHBOX_DIR/groups"
       configs_dir="$MATCHBOX_DIR/configs"
 
       upper(){ tr '[:lower:]' '[:upper:]'; }
+      normarch(){ case "${1,,}" in amd64|x86_64) echo "amd64";; arm64|aarch64) echo "arm64";; *) echo "$1";; esac; }
 
       install -d -m 0755 "$profiles_dir" "$groups_dir" "$configs_dir"
 
-      # 0) Copy/refresh the per-node configs into matchbox/configs
+      # --- Option A automated: ensure Talos PXE assets exist (download if missing) ---
+      ensure_asset() {
+        local dest="$1"; shift
+        local urls=("$@")
+        local dest_dir; dest_dir="$(dirname "$dest")"
+        install -d -m 0755 "$dest_dir"
+        if [[ -f "$dest" ]]; then
+          return 0
+        fi
+        for u in "${urls[@]}"; do
+          echo "[matchbox] fetching $(basename "$dest") from $u"
+          if command -v curl >/dev/null 2>&1; then
+            if curl -fsSL --retry 3 -o "$dest" "$u"; then
+              return 0
+            fi
+          elif command -v wget >/dev/null 2>&1; then
+            if wget -qO "$dest" "$u"; then
+              return 0
+            fi
+          else
+            echo "[matchbox] need curl or wget to download assets" >&2
+            exit 1
+          fi
+        done
+        echo "[matchbox] failed to download $(basename "$dest")" >&2
+        return 1
+      }
+
+      # Build candidate URLs for each file (filenames vary slightly by release)
+      # amd64 kernel
+      ensure_asset "$TALOS_KERNEL_AMD64" \
+        "${TALOS_RELEASE_BASE_1}/vmlinuz-amd64" \
+        "${TALOS_RELEASE_BASE_2}/amd64/vmlinuz"
+
+      # amd64 initramfs
+      ensure_asset "$TALOS_INITRD_AMD64" \
+        "${TALOS_RELEASE_BASE_1}/initramfs-amd64.xz" \
+        "${TALOS_RELEASE_BASE_2}/amd64/initramfs.xz"
+
+      # arm64 kernel
+      ensure_asset "$TALOS_KERNEL_ARM64" \
+        "${TALOS_RELEASE_BASE_1}/vmlinuz-arm64" \
+        "${TALOS_RELEASE_BASE_2}/arm64/vmlinuz"
+
+      # arm64 initramfs
+      ensure_asset "$TALOS_INITRD_ARM64" \
+        "${TALOS_RELEASE_BASE_1}/initramfs-arm64.xz" \
+        "${TALOS_RELEASE_BASE_2}/arm64/initramfs.xz"
+
+      # 0) Copy/refresh per-node Talos configs into matchbox/configs
       for H in "$CONTROL_VM_HOSTNAME" "$NUC1_HOSTNAME" "$NUC2_HOSTNAME"; do
         src="$TALOS_OUT_DIR/controlplane-${H}.yaml"
         dst="$configs_dir/controlplane-${H}.yaml"
@@ -1013,14 +1075,16 @@ write_files:
         install -m 0644 "$src" "$dst"
       done
 
-      # 1) Control-plane profile (reusable)
-      cat > "$profiles_dir/talos-controlplane.json" <<JSON
+      # 1) Write arch-specific profiles
+      write_profile() {
+        local profile_id="$1" kernel="$2" initrd="$3"
+        cat > "$profiles_dir/${profile_id}.json" <<JSON
       {
-        "id": "talos-controlplane",
-        "name": "Talos Control Plane",
+        "id": "${profile_id}",
+        "name": "${profile_id}",
         "boot": {
-          "kernel": "/assets/talos/${TALOS_VERSION}/vmlinuz",
-          "initrd": ["/assets/talos/${TALOS_VERSION}/initramfs.xz"],
+          "kernel": "${kernel}",
+          "initrd": ["${initrd}"],
           "args": [
             "talos.platform=metal",
             "console=tty0",
@@ -1031,53 +1095,62 @@ write_files:
         }
       }
       JSON
+        echo "  $profiles_dir/${profile_id}.json"
+      }
 
-      # 2) Per-node groups (selectors by MAC, payload chooses per-node config)
-      cvm_mac_uc="$(printf '%s' "$CONTROL_VM_MAC" | upper)"
-      nuc1_mac_uc="$(printf '%s' "$NUC1_MAC" | upper)"
-      nuc2_mac_uc="$(printf '%s' "$NUC2_MAC" | upper)"
+      echo "[matchbox] writing profiles…"
+      write_profile "talos-controlplane-amd64" "${TALOS_KERNEL_AMD64}" "${TALOS_INITRD_AMD64}"
+      write_profile "talos-controlplane-arm64" "${TALOS_KERNEL_ARM64}" "${TALOS_INITRD_ARM64}"
 
-      cat > "$groups_dir/${CONTROL_VM_HOSTNAME}.json" <<JSON
+      # 2) Groups per node (choose profile by arch)
+      arch_profile() {
+        case "$(normarch "$1")" in
+          amd64) echo "talos-controlplane-amd64" ;;
+          arm64) echo "talos-controlplane-arm64" ;;
+          *) echo "UNKNOWN" ;;
+        esac
+      }
+
+      emit_group() {
+        local host="$1" mac="$2" arch="$3"
+        local mac_uc profile_id
+        mac_uc="$(printf '%s' "$mac" | upper)"
+        profile_id="$(arch_profile "$arch")"
+        [[ "$profile_id" != "UNKNOWN" ]] || { echo "[matchbox] unsupported arch '$arch' for $host (use amd64 or arm64)"; exit 1; }
+
+        cat > "$groups_dir/${host}.json" <<JSON
       {
-        "id": "${CONTROL_VM_HOSTNAME}",
-        "name": "${CONTROL_VM_HOSTNAME} (control-plane)",
-        "profile": "talos-controlplane",
-        "selector": { "mac": "${cvm_mac_uc}" },
-        "metadata": { "http_ip": "${ADMIN_VM_IP}", "config": "controlplane-${CONTROL_VM_HOSTNAME}.yaml" }
+        "id": "${host}",
+        "name": "${host} (control-plane ${arch})",
+        "profile": "${profile_id}",
+        "selector": { "mac": "${mac_uc}" },
+        "metadata": { "http_ip": "${ADMIN_VM_IP}", "config": "controlplane-${host}.yaml" }
       }
       JSON
-
-      cat > "$groups_dir/${NUC1_HOSTNAME}.json" <<JSON
-      {
-        "id": "${NUC1_HOSTNAME}",
-        "name": "${NUC1_HOSTNAME} (control-plane)",
-        "profile": "talos-controlplane",
-        "selector": { "mac": "${nuc1_mac_uc}" },
-        "metadata": { "http_ip": "${ADMIN_VM_IP}", "config": "controlplane-${NUC1_HOSTNAME}.yaml" }
+        echo "  $groups_dir/${host}.json"
       }
-      JSON
 
-      cat > "$groups_dir/${NUC2_HOSTNAME}.json" <<JSON
-      {
-        "id": "${NUC2_HOSTNAME}",
-        "name": "${NUC2_HOSTNAME} (control-plane)",
-        "profile": "talos-controlplane",
-        "selector": { "mac": "${nuc2_mac_uc}" },
-        "metadata": { "http_ip": "${ADMIN_VM_IP}", "config": "controlplane-${NUC2_HOSTNAME}.yaml" }
-      }
-      JSON
+      echo "[matchbox] writing groups…"
+      emit_group "$CONTROL_VM_HOSTNAME" "$CONTROL_VM_MAC" "$(normarch "${CONTROL_ARCH:-amd64}")"
+      emit_group "$NUC1_HOSTNAME" "$NUC1_MAC" "$(normarch "${NUC1_ARCH:-amd64}")"
+      emit_group "$NUC2_HOSTNAME" "$NUC2_MAC" "$(normarch "${NUC2_ARCH:-amd64}")"
 
       echo "[matchbox] wrote:"
-      echo "  $profiles_dir/talos-controlplane.json"
-      echo "  $groups_dir/${CONTROL_VM_HOSTNAME}.json"
-      echo "  $groups_dir/${NUC1_HOSTNAME}.json"
-      echo "  $groups_dir/${NUC2_HOSTNAME}.json"
-      echo "  $configs_dir/controlplane-*.yaml"
+      echo "  profiles:"
+      echo "    - $profiles_dir/talos-controlplane-amd64.json"
+      echo "    - $profiles_dir/talos-controlplane-arm64.json"
+      echo "  groups:"
+      echo "    - $groups_dir/${CONTROL_VM_HOSTNAME}.json"
+      echo "    - $groups_dir/${NUC1_HOSTNAME}.json"
+      echo "    - $groups_dir/${NUC2_HOSTNAME}.json"
+      echo "  configs:"
+      echo "    - $configs_dir/controlplane-*.yaml"
 
-      # Optional: nudge matchbox (it hot-reads JSON anyway)
+      # Optional: nudge matchbox
       if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet matchbox 2>/dev/null; then
         systemctl reload-or-restart matchbox || true
       fi
+
 
   # -------- convenience wrapper: run all steps safely anytime --------
   - path: /usr/local/bin/cloud-apply
