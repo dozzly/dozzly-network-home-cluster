@@ -5,4 +5,6 @@ kind: Kustomization
 resources:
   - helmrepo.yaml       # HelmRepository (namespace: flux-system)
   - helmrelease.yaml    # HelmRelease
+  - ipaddresspool.yaml
+  - l2adv.yaml
 # Or whatever the file is named (values.yaml via valuesFrom is fine too)

@@ -1,21 +1,26 @@
+# infra/metallb/helmrelease.yaml
 apiVersion: helm.toolkit.fluxcd.io/v2
 kind: HelmRelease
 metadata:
   name: metallb
-  namespace: flux-system
+  namespace: flux-system              # CR lives here
 spec:
+  targetNamespace: metallb-system     # chart installs here
   interval: 5m
+  install:
+    createNamespace: true
+    remediation:
+      retries: 3
+  upgrade:
+    remediation:
+      retries: 3
   chart:
     spec:
-     targetNamespace: metallb-system
-     install:
-       createNamespace: true           # ADD this
-       remediation: { retries: 3 }
       chart: metallb
       version: 0.15.2
       sourceRef:
         kind: HelmRepository
         name: metallb
         namespace: flux-system
-  values:
-    # your values here (e.g., address pools)
+  values: {}
+
