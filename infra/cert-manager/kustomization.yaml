@@ -5,6 +5,6 @@ kind: Kustomization
 resources:
   - helmrepo.yaml         # HelmRepository (flux-system)
   - helmrelease.yaml
-  - issuers.yaml
-  - clusterissuer.yaml
+#  - issuers.yaml
+#  - clusterissuer.yaml
 # Or whatever the file is named (values.yaml via valuesFrom is fine too)
