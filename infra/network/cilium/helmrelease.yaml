@@ -28,6 +28,9 @@ spec:
     ipam:
       mode: kubernetes
 
+    agent:
+      cleanCiliumState: false
+
     # Keep kube-proxy for now
     kubeProxyReplacement: false
 
@@ -36,6 +39,9 @@ spec:
     tunnelProtocol: vxlan
 
     # Talos-specific configuration
+    bpf:
+      autoMount:
+        enabled: true
     cgroup:
       autoMount: false
       hostRoot: /sys/fs/cgroup
