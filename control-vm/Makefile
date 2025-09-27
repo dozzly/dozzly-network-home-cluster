@@ -70,7 +70,7 @@ run: check disk
 	  -drive if=pflash,format=raw,readonly=on,file="$(EFI_CODE)" \
 	  -drive if=pflash,format=raw,file="$(EFI_VARS)" \
 	  -netdev vmnet-bridged,id=net0,ifname=$(BRIDGE_IF) \
-	  -device virtio-net-pci,netdev=net0,mac=$(MAC) \
+	  -device virtio-net-pci,netdev=net0,mac=$(MAC),bootindex=1 \
 	  -drive if=none,id=vdisk0,file="$(DISK)",format=qcow2,cache=none,aio=threads \
 	  -device virtio-blk-pci,drive=vdisk0 \
 	  -boot order=n,menu=on \
@@ -86,7 +86,7 @@ run-gui: check disk
 	  -drive if=pflash,format=raw,readonly=on,file="$(EFI_CODE)" \
 	  -drive if=pflash,format=raw,file="$(EFI_VARS)" \
 	  -netdev vmnet-bridged,id=net0,ifname=$(BRIDGE_IF) \
-	  -device virtio-net-pci,netdev=net0,mac=$(MAC) \
+	  -device virtio-net-pci,netdev=net0,mac=$(MAC),bootindex=1 \
 	  -drive if=none,id=vdisk0,file="$(DISK)",format=qcow2,cache=none,aio=threads \
 	  -device virtio-blk-pci,drive=vdisk0 \
 	  -boot order=n \
