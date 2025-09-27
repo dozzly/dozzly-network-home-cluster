@@ -11,7 +11,7 @@ spec:
   wait: true
   sourceRef:
     kind: GitRepository
-    name: flux-system
+    name: dozzly-network-home-cluster
     namespace: flux-system
   path: ./infra
   healthChecks:

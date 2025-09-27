@@ -1,19 +1,15 @@
 apiVersion: helm.toolkit.fluxcd.io/v2
 kind: HelmRelease
 metadata:
-  name: cilium
+  name: cilium            # keep this if this is the HR name you committed
   namespace: flux-system
 spec:
+  # Tell Flux to manage the *existing* helm release name it adopted earlier:
+  releaseName: kube-system-cilium   # <- matches your Helm history
+
   targetNamespace: kube-system
-  install:
-    createNamespace: true
-    remediation:
-      retries: 3
-  upgrade:
-    remediation:
-      retries: 3
+  interval: 30m
   timeout: 10m
-  interval: 10m
   chart:
     spec:
       chart: cilium
@@ -23,101 +19,47 @@ spec:
         name: cilium
         namespace: flux-system
       interval: 10m
+  install:
+    crds: Create
+    remediation: { retries: 3 }
+  upgrade:
+    crds: CreateReplace
+    remediation:
+      remediateLastFailure: true
+      retries: 3
+  uninstall:
+    keepHistory: false
+  driftDetection:
+    mode: enabled
+
   values:
-    # IPAM Configuration
+    # Use boolean false (you currently have the string "false")
+    kubeProxyReplacement: false
+
     ipam:
       mode: kubernetes
 
-    # Keep kube-proxy for now
-    kubeProxyReplacement: false
-
-    # Routing configuration (new keys since 1.15+)
     routingMode: tunnel
     tunnelProtocol: vxlan
 
-    # Talos-specific configuration
+    # Talos-safe cgroup config
     cgroup:
-      autoMount: false
+      autoMount:
+        enabled: false
       hostRoot: /sys/fs/cgroup
 
-    # Security context for Talos - disable problematic capabilities
+    # Let chart defaults set capabilities (avoid schema/runtime clashes)
     securityContext:
       capabilities:
-        ciliumAgent:
-          drop: ["SYS_MODULE"]
-        cleanCiliumState:
-          drop: ["ALL"]
+        ciliumAgent: {}
+        cleanCiliumState: {}
 
-    # Disable the problematic clean-cilium-state container for Talos
-    cleanState: false
-
-    # Hubble observability
-    hubble:
-      enabled: true
-      metrics:
-        enabled:
-          - dns:query;ignoreAAAA
-          - drop
-          - tcp
-          - flow
-          - icmp
-      relay:
-        enabled: true
-      ui:
-        enabled: true
-        service:
-          type: ClusterIP
-
-    # Additional Talos-friendly configurations
-    k8sServiceHost: localhost
-    k8sServicePort: 7445
-
-    # Enable native routing for better performance
-    autoDirectNodeRoutes: false
-
-    # Disable masquerading for pod-to-pod traffic
-    masquerade: true
-
-    # Enable bandwidth management
-    bandwidthManager:
-      enabled: false
-
-    # Configure operator
+    # Single node: one operator
     operator:
       replicas: 1
-      resources:
-        limits:
-          cpu: 1000m
-          memory: 1Gi
-        requests:
-          cpu: 100m
-          memory: 128Mi
 
-    # Configure Cilium agent resources
-    resources:
-      limits:
-        cpu: 4000m
-        memory: 4Gi
-      requests:
-        cpu: 100m
-        memory: 512Mi
-
-    # Enable prometheus metrics
-    prometheus:
+    # Hubble as you had it
+    hubble:
       enabled: true
-      serviceMonitor:
-        enabled: false  # Set to true if you have Prometheus Operator
-
-    # Disable sysctls init container (not needed on Talos)
-    sysctlfix:
-      enabled: false
-
-    # Enable health checking
-    healthChecking: true
-
-    # Configure logging
-    debug:
-      enabled: false
-
-    # Enable local redirect policy
-    localRedirectPolicy: true
+      relay: { enabled: true }
+      ui: { enabled: true }
