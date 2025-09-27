@@ -12,8 +12,8 @@ spec:
   sourceRef:
     kind: GitRepository
     name: flux-system
+    namespace: flux-system
   path: ./infra
-  wait: true
   healthChecks:
     - apiVersion: apps/v1
       kind: Deployment
