@@ -24,6 +24,7 @@ spec:
     ipam:
       mode: kubernetes
     kubeProxyReplacement: "partial"   # or "strict" if you disable kube-proxy in Talos
+    tunnel: vxlan                     # or: tunnel: disabled + routingMode: native
     hubble:
       enabled: true
       metrics:
