@@ -16,6 +16,9 @@ spec:
   install:
     createNamespace: true
   values:
+    additionalArguments:
+      - --entrypoints.web.http.redirections.entrypoint.to=websecure
+      - --entrypoints.web.http.redirections.entrypoint.scheme=https
     ingressClass:
       enabled: true
       isDefaultClass: true        # optional; makes traefik default
@@ -26,8 +29,9 @@ spec:
       annotations: {}             # (optional MetalLB annotations)
     ports:
       web:
-        redirectTo: websecure     # HTTP->HTTPS
+        port: 80
       websecure:
+        port: 443
         tls:
           enabled: true
     providers:

@@ -22,4 +22,5 @@ spec:
         name: cert-manager            # must match your helmrepo.yaml
         namespace: flux-system
   values:
-    installCRDs: true
+    crds:
+      enabled: true
