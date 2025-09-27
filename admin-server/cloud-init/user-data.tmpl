@@ -219,28 +219,47 @@ write_files:
 
       # ---------- dnsmasq ProxyDHCP ----------
       cat >/etc/dnsmasq.d/pxe.conf <<EOF
-      # ProxyDHCP only
+      # /etc/dnsmasq.d/pxe.conf
+
+      # ProxyDHCP only (no DNS)
       port=0
       log-dhcp
+      no-resolv
+      no-poll
 
-      # No leases here; we're just the PXE proxy
+      # Bind only on the PXE-facing NIC
+      interface=enp0s1
+      bind-interfaces
+
+      # We are a DHCP PROXY on this subnet (no leases)
       dhcp-range=192.168.1.0,proxy
+      dhcp-authoritative
+      # some firmwares only obey broadcast proxy replies
+      dhcp-broadcast
 
       # Arch tags (DHCP option 93)
       dhcp-match=set:bios,option:client-arch,0
       dhcp-match=set:efi64,option:client-arch,7
       dhcp-match=set:efiarm64,option:client-arch,11
 
-      # Detect iPXE (user-class 77)
-      dhcp-userclass=set:ipxe,iPXE
+      # Detect iPXE (option 77 "user-class" or the iPXE-specific option 175)
+      dhcp-match=set:ipxe,option:user-class,iPXE
+      dhcp-match=set:ipxe,175
 
-      # iPXE clients -> matchbox
-      dhcp-boot=net:ipxe,http://${ADMIN_VM_IP}:8080/boot.ipxe?mac=\${net0/mac}
+      # iPXE clients → jump straight to Matchbox over HTTP
+      dhcp-boot=tag:ipxe,http://${ADMIN_VM_IP}:8080/boot.ipxe?mac=${net0/mac}
 
-      # First-stage binaries
-      dhcp-boot=tag:bios,ipxe/undionly.kpxe,,${ADMIN_VM_IP}
-      dhcp-boot=tag:efi64,ipxe/ipxe_x86_64.efi,,${ADMIN_VM_IP}
+      # Non-iPXE clients → tell firmware which TFTP file to fetch
+      # (TFTP is served by tftpd-hpa on this host)
+      pxe-prompt="Network boot (iPXE)", 3
+      pxe-service=tag:efiarm64,0,"UEFI ARM64 iPXE",ipxe/snponly_arm64.efi,${ADMIN_VM_IP}
+      pxe-service=tag:efi64,  0,"UEFI x64 iPXE",   ipxe/ipxe_x86_64.efi,  ${ADMIN_VM_IP}
+      pxe-service=tag:bios,   0,"BIOS iPXE",       ipxe/undionly.kpxe,    ${ADMIN_VM_IP}
+
+      # Fallback in case pxe-service is ignored (some fw) — keep your dhcp-boot lines too
       dhcp-boot=tag:efiarm64,ipxe/snponly_arm64.efi,,${ADMIN_VM_IP}
+      dhcp-boot=tag:efi64,   ipxe/ipxe_x86_64.efi,,${ADMIN_VM_IP}
+      dhcp-boot=tag:bios,    ipxe/undionly.kpxe,,${ADMIN_VM_IP}
       EOF
 
       # Ensure tftpd-hpa serves our TFTP root
@@ -293,6 +312,7 @@ write_files:
       ExecStartPre=/usr/bin/test -x /usr/local/bin/matchbox
       ExecStartPre=/usr/bin/test -d /srv/matchbox
       ExecStartPre=/usr/bin/test -d /srv/matchbox/assets
+      ExecStartPre=/usr/bin/curl -fsS http://127.0.0.1:8080/boot.ipxe
       ExecStart=/usr/local/bin/matchbox \
         -address=0.0.0.0:8080 \
         -data-path=/srv/matchbox \
@@ -1495,7 +1515,7 @@ runcmd:
   - [ bash, -lc, "sudo -u ${admin_user} bash -lc '/usr/local/bin/krew-install.sh' || true" ]
 
   # Firewall (optional)
-  - [ bash, -lc, "ufw allow OpenSSH; ufw allow http; ufw allow 69/udp; ufw allow 67/udp; ufw allow 6443/tcp; ufw allow 8080/tcp; ufw --force enable" ]
+  - [ bash, -lc, "ufw allow OpenSSH; ufw allow http; ufw allow 69/udp; ufw allow 67/udp; ufw allow 6443/tcp; ufw allow 8080/tcp; ufw allow 4011/udp; ufw --force enable" ]
 
   # Ensure .bashrc loads .bashrc.d snippets
   - [ bash, -lc, 'grep -q bashrc.d "/home/${admin_user}/.bashrc" 2>/dev/null || printf "%s\n" "# Load per-snippet bashrc.d files if present" "if [ -d \"$HOME/.bashrc.d\" ]; then" "  for f in \"$HOME/.bashrc.d/\"*.sh; do [ -r \"$f\" ] && . \"$f\"; done" "fi" >> "/home/${admin_user}/.bashrc"' ]
