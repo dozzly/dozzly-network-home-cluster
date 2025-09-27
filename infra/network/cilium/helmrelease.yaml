@@ -23,7 +23,7 @@ spec:
   values:
     ipam:
       mode: kubernetes
-    kubeProxyReplacement: "partial"   # keep this since kube-proxy is still there
+    kubeProxyReplacement: "false"   # keep this since kube-proxy is still there
     routingMode: tunnel               # <- replaces old `tunnel` flag
     tunnelProtocol: vxlan             # <- replaces `tunnel: vxlan`
     hubble:
