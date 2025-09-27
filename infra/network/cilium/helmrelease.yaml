@@ -28,9 +28,6 @@ spec:
     ipam:
       mode: kubernetes
 
-    agent:
-      cleanCiliumState: false
-
     # Keep kube-proxy for now
     kubeProxyReplacement: false
 
@@ -39,20 +36,20 @@ spec:
     tunnelProtocol: vxlan
 
     # Talos-specific configuration
-    bpf:
-      autoMount:
-        enabled: true
     cgroup:
       autoMount: false
       hostRoot: /sys/fs/cgroup
 
-    # Security context for Talos
+    # Security context for Talos - disable problematic capabilities
     securityContext:
       capabilities:
         ciliumAgent:
           drop: ["SYS_MODULE"]
         cleanCiliumState:
-          drop: ["SYS_MODULE"]
+          drop: ["ALL"]
+
+    # Disable the problematic clean-cilium-state container for Talos
+    cleanState: false
 
     # Hubble observability
     hubble:
@@ -100,7 +97,7 @@ spec:
     resources:
       limits:
         cpu: 4000m
-        memory: 2Gi
+        memory: 4Gi
       requests:
         cpu: 100m
         memory: 512Mi
@@ -111,26 +108,9 @@ spec:
       serviceMonitor:
         enabled: false  # Set to true if you have Prometheus Operator
 
-    # Configure node initialization
-    nodeInitContainers:
-      # Talos doesn't need sysctls container
-      - name: mount-cgroup
-        image: quay.io/cilium/cilium:v1.17.8
-        command:
-          - /bin/bash
-          - -c
-          - |
-            set -euo pipefail
-            if [ ! -d /host/sys/fs/cgroup/cilium ]; then
-              mkdir -p /host/sys/fs/cgroup/cilium
-            fi
-        volumeMounts:
-          - name: hostproc
-            mountPath: /host/proc
-          - name: cgroup
-            mountPath: /host/sys/fs/cgroup
-        securityContext:
-          privileged: true
+    # Disable sysctls init container (not needed on Talos)
+    sysctlfix:
+      enabled: false
 
     # Enable health checking
     healthChecking: true
