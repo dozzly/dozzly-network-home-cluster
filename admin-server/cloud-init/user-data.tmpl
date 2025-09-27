@@ -283,6 +283,21 @@ write_files:
 
       echo "[setup-pxe] ready: ProxyDHCP (dnsmasq) + TFTP ($TFTP_ROOT) + iPXE (arm64 + x86_64)."
 
+  - path: /var/lib/tftpboot/autoexec.ipxe
+    permissions: "0644"
+    owner: "root:root"
+    content: |
+      #!ipxe
+      # give firmware/bridge a sec to settle
+      sleep 1
+
+      # ensure we actually have a lease in iPXE (not just cached from firmware)
+      :nettry
+      dhcp || goto nettry
+
+      # go to matchbox (will render the right script for this MAC)
+      chain --autofree http://192.168.1.152:8080/boot.ipxe || shell
+
   # Simple iPXE script (example: Talos)
   - path: /srv/matchbox/pxe/talos.ipxe
     permissions: "0644"
@@ -413,9 +428,10 @@ write_files:
       NUC2_ROLE=control
       NUC2_IFACE=enp1s0
 
-      GATEWAY=192.168.1.1
-      DNS1=1.1.1.1
-      DNS2=8.8.8.8
+      GATEWAY_IP=192.168.1.1
+      NETMASK=255.255.255.0
+      DNS0=1.1.1.1
+      DNS1=8.8.8.8
 
       # Where to stash Talos outputs
       TALOS_OUT_DIR="/srv/talos"
@@ -984,6 +1000,47 @@ write_files:
 
   # -------- Matchbox Configuration Publish --------
   
+  - path: /usr/local/bin/gen_node.sh
+    permissions: "0755"
+    owner: root:root
+    content: |
+      #!/usr/bin/env bash
+      # usage: gen-node host mac arch ip
+      set -euo pipefail
+      host="$1"; mac="$2"; arch="$3"; ip="$4"
+
+      # shellcheck disable=SC1091
+      . /etc/cloud/admin.env
+
+      MATCHBOX_DIR=${MATCHBOX_DIR:-/srv/matchbox}
+      profiles_dir="$MATCHBOX_DIR/profiles"
+      groups_dir="$MATCHBOX_DIR/groups"
+      install -d -m 0755 "$profiles_dir" "$groups_dir"
+
+      compose_ip_static(){ local ip="$1" gw="$2" nm="$3" host="$4" dns0="$5" dns1="${6:-}"; [[ -n "$dns1" ]] && printf '%s::%s:%s:%s::off:%s:%s' "$ip" "$gw" "$nm" "$host" "$dns0" "$dns1" || printf '%s::%s:%s:%s::off:%s' "$ip" "$gw" "$nm" "$host" "$dns0"; }
+
+      ip_static="$(compose_ip_static "$ip" "$GATEWAY_IP" "$NETMASK" "$host" "$DNS0" "$DNS1")"
+      arch_norm="$(echo "$arch" | awk '{print tolower($0)}' | sed 's/x86_64/amd64/; s/aarch64/arm64/')"
+      kernel="/assets/talos/${TALOS_VERSION}/${arch_norm}/vmlinuz"
+      initrd="/assets/talos/${TALOS_VERSION}/${arch_norm}/initramfs.xz"
+      profile_id="talos-${host}-${arch_norm}"
+
+      cat > "$profiles_dir/${profile_id}.json" <<JSON
+      { "id": "${profile_id}", "name": "${profile_id}",
+        "boot": { "kernel": "${kernel}", "initrd": ["${initrd}"],
+          "args": ["talos.platform=metal","console=tty0","console=ttyS0,115200n8","rd.neednet=1","ip=${ip_static}","slab_nomerge","pti=on","talos.config=http://${ADMIN_VM_IP}:${MATCHBOX_HTTP_PORT}/assets/configs/controlplane-${host}.yaml"] } }
+      JSON
+
+      mac_lc="$(echo "$mac" | tr A-F a-f)"
+      cat > "$groups_dir/${host}.json" <<JSON
+      { "id":"${host}","name":"${host} (${arch_norm})","profile":"${profile_id}","selector":{"mac":"${mac_lc}"} }
+      JSON
+
+      systemctl reload-or-restart matchbox || true
+      echo "Added node ${host} (${arch_norm}) with MAC ${mac_lc} → profile ${profile_id}"
+
+  # -------- Matchbox Configuration Publish --------
+  
   - path: /usr/local/bin/matchbox-publish-configs.sh
     permissions: "0755"
     owner: root:root
@@ -999,6 +1056,8 @@ write_files:
         echo "[matchbox] /etc/cloud/admin.env missing; aborting" >&2
         exit 1
       fi
+
+      : "${BAKE_STATIC_IP:=true}"   # true => per-node profiles; false => shared + metadata
 
       : "${MATCHBOX_DIR:=/srv/matchbox}"
       : "${MATCHBOX_HTTP_PORT:=8080}"
@@ -1018,7 +1077,17 @@ write_files:
       : "${NUC1_ARCH:=amd64}"
       : "${NUC2_ARCH:=amd64}"
 
-      # Optional: use iPXE ${next-server} instead of hardcoding ADMIN_VM_IP in talos.config
+      # ---- Static networking (REQUIRED for static PXE) ----------------------------
+      # One IP per node, plus common GW/NM/DNS. Add these to /etc/cloud/admin.env.
+      : "${CONTROL_VM_IP:?Set CONTROL_VM_IP (e.g. 192.168.1.155)}"
+      : "${NUC1_IP:?Set NUC1_IP}"
+      : "${NUC2_IP:?Set NUC2_IP}"
+      : "${GATEWAY_IP:?Set GATEWAY_IP (e.g. 192.168.1.1)}"
+      : "${NETMASK:?Set NETMASK (e.g. 255.255.255.0)}"
+      : "${DNS0:?Set DNS0}"
+      : "${DNS1:=}"
+
+      # Optional: use iPXE ${next-server} in talos.config URL
       : "${USE_NEXT_SERVER:=false}"
 
       # --- Paths -------------------------------------------------------------------
@@ -1029,25 +1098,37 @@ write_files:
       configs_dst_dir="$assets_dir/configs"          # must be under assets so it’s HTTP-served
       install -d -m 0755 "$assets_dir" "$profiles_dir" "$groups_dir" "$configs_dst_dir"
 
-      # Filesystem locations for downloaded PXE bits
+      # Filesystem locations for PXE bits
       talos_fs_kernel_amd64="$assets_dir/talos/${TALOS_VERSION}/amd64/vmlinuz"
       talos_fs_initrd_amd64="$assets_dir/talos/${TALOS_VERSION}/amd64/initramfs.xz"
       talos_fs_kernel_arm64="$assets_dir/talos/${TALOS_VERSION}/arm64/vmlinuz"
       talos_fs_initrd_arm64="$assets_dir/talos/${TALOS_VERSION}/arm64/initramfs.xz"
 
-      # HTTP paths that iPXE will fetch (what goes into the profile JSON)
+      # HTTP paths used in profile JSON
       talos_http_kernel_amd64="/assets/talos/${TALOS_VERSION}/amd64/vmlinuz"
       talos_http_initrd_amd64="/assets/talos/${TALOS_VERSION}/amd64/initramfs.xz"
       talos_http_kernel_arm64="/assets/talos/${TALOS_VERSION}/arm64/vmlinuz"
       talos_http_initrd_arm64="/assets/talos/${TALOS_VERSION}/arm64/initramfs.xz"
 
-      # Where to fetch releases from
+      # Where to fetch releases from (keep both patterns)
       : "${TALOS_RELEASE_BASE_1:=https://github.com/siderolabs/talos/releases/download/${TALOS_VERSION}}"
       : "${TALOS_RELEASE_BASE_2:=https://github.com/siderolabs/talos/releases/download/${TALOS_VERSION}}"
 
       upper(){ tr '[:lower:]' '[:upper:]'; }
       lower(){ tr '[:upper:]' '[:lower:]'; }
       normarch(){ case "${1,,}" in amd64|x86_64) echo "amd64";; arm64|aarch64) echo "arm64";; *) echo "$1";; esac; }
+
+      compose_ip_static() {
+        # Linux initramfs static format:
+        # ip=<client-ip>::<gateway>:<netmask>:<hostname>:<device>:<autoconf>[:<dns0>][:<dns1>]
+        # We leave <device> empty (let initramfs pick first NIC), disable autoconf.
+        local ip="$1" gw="$2" nm="$3" host="$4" dns0="$5" dns1="${6:-}"
+        if [[ -n "$dns1" ]]; then
+          printf '%s::%s:%s:%s::off:%s:%s' "$ip" "$gw" "$nm" "$host" "$dns0" "$dns1"
+        else
+          printf '%s::%s:%s:%s::off:%s' "$ip" "$gw" "$nm" "$host" "$dns0"
+        fi
+      }
 
       # --- Fetch Talos PXE assets if missing --------------------------------------
       ensure_asset() {
@@ -1098,20 +1179,18 @@ write_files:
       publish_config "$NUC1_HOSTNAME"
       publish_config "$NUC2_HOSTNAME"
 
-      # --- Profiles ----------------------------------------------------------------
-      talos_config_url() {
+      # --- Profiles (shared per arch; templated args) ------------------------------
+      talos_config_url_template() {
         local node="$1"
         if [[ "${USE_NEXT_SERVER}" == "true" ]]; then
-          # portable if DHCP sets next-server to the matchbox IP
           echo "http://\${next-server}:${MATCHBOX_HTTP_PORT}/assets/configs/controlplane-${node}.yaml"
         else
           echo "http://${ADMIN_VM_IP}:${MATCHBOX_HTTP_PORT}/assets/configs/controlplane-${node}.yaml"
         fi
       }
 
-      write_profile() {
-        local profile_id="$1" kernel_http="$2" initrd_http="$3" node="$4"
-        local cfg_url; cfg_url="$(talos_config_url "$node")"
+      write_shared_profile() {
+        local profile_id="$1" kernel_http="$2" initrd_http="$3"
         cat > "$profiles_dir/${profile_id}.json" <<JSON
       {
         "id": "${profile_id}",
@@ -1123,22 +1202,55 @@ write_files:
             "talos.platform=metal",
             "console=tty0",
             "console=ttyS0,115200n8",
-            "ip=dhcp",
+            "rd.neednet=1",
+            "ip={{.IP_STATIC}}",
             "slab_nomerge",
             "pti=on",
-            "talos.config=${cfg_url}"
-            ]
+            "talos.config=http://{{.HTTP_IP}}:${MATCHBOX_HTTP_PORT}/assets/configs/{{.CONFIG}}"
+          ]
         }
       }
       JSON
         echo "  + $profiles_dir/${profile_id}.json"
       }
 
-      echo "[matchbox] writing profiles:"
-      write_profile "talos-controlplane-amd64" "$talos_http_kernel_amd64" "$talos_http_initrd_amd64" "$CONTROL_VM_HOSTNAME"
-      write_profile "talos-controlplane-arm64" "$talos_http_kernel_arm64" "$talos_http_initrd_arm64" "$CONTROL_VM_HOSTNAME"
+      # If BAKE_STATIC_IP=true, write an explicit per-node profile with ip=... baked in.
+      write_node_profile() {
+        local host="$1" arch="$2" node_ip="$3"
+        local kernel_http initrd_http
+        case "$(normarch "$arch")" in
+          amd64) kernel_http="$talos_http_kernel_amd64"; initrd_http="$talos_http_initrd_amd64" ;;
+          arm64) kernel_http="$talos_http_kernel_arm64"; initrd_http="$talos_http_initrd_arm64" ;;
+          *) echo "[matchbox] unsupported arch '$arch'"; return 1 ;;
+        esac
 
-      # --- Groups (per node) -------------------------------------------------------
+        local ip_static; ip_static="$(compose_ip_static "$node_ip" "$GATEWAY_IP" "$NETMASK" "$host" "$DNS0" "$DNS1")"
+        local profile_id="talos-${host}-$(normarch "$arch")"
+
+        cat > "$profiles_dir/${profile_id}.json" <<JSON
+      {
+        "id": "${profile_id}",
+        "name": "${profile_id}",
+        "boot": {
+          "kernel": "${kernel_http}",
+          "initrd": ["${initrd_http}"],
+          "args": [
+            "talos.platform=metal",
+            "console=tty0",
+            "console=ttyS0,115200n8",
+            "rd.neednet=1",
+            "ip=${ip_static}",
+            "slab_nomerge",
+            "pti=on",
+            "talos.config=http://${ADMIN_VM_IP}:${MATCHBOX_HTTP_PORT}/assets/configs/controlplane-${host}.yaml"
+          ]
+        }
+      }
+      JSON
+        echo "  + $profiles_dir/${profile_id}.json"
+      }
+
+      # --- Groups (per node; inject metadata for ip/config/http_ip) ----------------
       arch_profile() {
         case "$(normarch "$1")" in
           amd64) echo "talos-controlplane-amd64" ;;
@@ -1147,15 +1259,20 @@ write_files:
         esac
       }
 
-      emit_group() {
-        local host="$1" mac="$2" arch="$3"
-        local profile_id; profile_id="$(arch_profile "$arch")"
-        [[ "$profile_id" != "UNKNOWN" ]] || { echo "[matchbox] unsupported arch '$arch' for $host (use amd64 or arm64)"; exit 1; }
+      echo "[matchbox] writing profiles:"
+      # always write the shared ones (harmless), used when BAKE_STATIC_IP=false
+      write_shared_profile "talos-controlplane-amd64" "$talos_http_kernel_amd64" "$talos_http_initrd_amd64"
+      write_shared_profile "talos-controlplane-arm64" "$talos_http_kernel_arm64" "$talos_http_initrd_arm64"
 
-        # normalize MAC to lowercase for matching
+      emit_group() {
+        local host="$1" mac="$2" arch="$3" node_ip="$4"
         local mac_lc; mac_lc="$(printf '%s' "$mac" | lower)"
 
-        cat > "$groups_dir/${host}.json" <<JSON
+        if [[ "${BAKE_STATIC_IP}" == "true" ]]; then
+          # per-node profile with baked static ip
+          write_node_profile "$host" "$arch" "$node_ip"
+          local profile_id="talos-${host}-$(normarch "$arch")"
+          cat > "$groups_dir/${host}.json" <<JSON
       {
         "id": "${host}",
         "name": "${host} (control-plane ${arch})",
@@ -1163,13 +1280,31 @@ write_files:
         "selector": { "mac": "${mac_lc}" }
       }
       JSON
+        else
+          # shared profile + per-node metadata
+          local profile_id; profile_id="$(arch_profile "$arch")"
+          local ip_static; ip_static="$(compose_ip_static "$node_ip" "$GATEWAY_IP" "$NETMASK" "$host" "$DNS0" "$DNS1")"
+          cat > "$groups_dir/${host}.json" <<JSON
+      {
+        "id": "${host}",
+        "name": "${host} (control-plane ${arch})",
+        "profile": "${profile_id}",
+        "selector": { "mac": "${mac_lc}" },
+        "metadata": {
+          "http_ip": "${ADMIN_VM_IP}",
+          "config": "controlplane-${host}.yaml",
+          "ip_static": "${ip_static}"
+        }
+      }
+      JSON
+        fi
         echo "  + $groups_dir/${host}.json"
       }
 
       echo "[matchbox] writing groups:"
-      emit_group "$CONTROL_VM_HOSTNAME" "$CONTROL_VM_MAC" "${CONTROL_ARCH:-amd64}"
-      emit_group "$NUC1_HOSTNAME"       "$NUC1_MAC"       "${NUC1_ARCH:-amd64}"
-      emit_group "$NUC2_HOSTNAME"       "$NUC2_MAC"       "${NUC2_ARCH:-amd64}"
+      emit_group "$CONTROL_VM_HOSTNAME" "$CONTROL_VM_MAC" "${CONTROL_ARCH:-amd64}" "$CONTROL_VM_IP"
+      emit_group "$NUC1_HOSTNAME"       "$NUC1_MAC"       "${NUC1_ARCH:-amd64}"   "$NUC1_IP"
+      emit_group "$NUC2_HOSTNAME"       "$NUC2_MAC"       "${NUC2_ARCH:-amd64}"   "$NUC2_IP"
 
       echo "[matchbox] wrote:"
       echo "  profiles:"
@@ -1186,6 +1321,7 @@ write_files:
       if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet matchbox 2>/dev/null; then
         systemctl reload-or-restart matchbox || true
       fi
+
 
   # -------- convenience wrapper: run all steps safely anytime --------
   - path: /usr/local/bin/cloud-apply
