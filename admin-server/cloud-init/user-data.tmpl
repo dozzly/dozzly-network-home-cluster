@@ -1158,7 +1158,7 @@ write_files:
         "${TALOS_RELEASE_BASE_1}/initramfs-arm64.xz" \
         "${TALOS_RELEASE_BASE_2}/arm64/initramfs.xz"
 
-      # --- Publish Talos machine configs under assets/configs ----------------------
+      # --- Publish Talos machine configs under assets/configs and patch disks ----------------------
       publish_config() {
         local node="$1"
         local src="$configs_src_dir/controlplane-${node}.yaml"
@@ -1172,6 +1172,45 @@ write_files:
       publish_config "$CONTROL_VM_HOSTNAME"
       publish_config "$NUC1_HOSTNAME"
       publish_config "$NUC2_HOSTNAME"
+
+      # --- Per-node install disk ---------------------------------------------------
+      disk_for_host() {
+        case "$1" in
+          "$CONTROL_VM_HOSTNAME") echo "${CONTROL_VM_DISK:-/dev/vda}" ;;
+          "$NUC1_HOSTNAME")       echo "${NUC1_DISK:-/dev/sda}" ;;
+          "$NUC2_HOSTNAME")       echo "${NUC2_DISK:-/dev/sda}" ;;
+          *)                      echo "/dev/vda" ;;
+        esac
+      }
+
+      patch_install_disk() {
+        local host_name="$1"
+        local dst="$assets_dir/configs/controlplane-${host_name}.yaml"
+        local DISK; DISK="$(disk_for_host "$host_name")"
+
+        if [[ ! -f "$dst" ]]; then
+          echo "[matchbox] WARN: config not found for ${host_name}: $dst"
+          return 0
+        fi
+
+        if command -v yq >/dev/null 2>&1; then
+          # kislyuk yq (jq-style filter) needs -y with -i
+          DISK="$DISK" yq -y -i '
+            .machine.install = (.machine.install // {}) |
+            .machine.install.disk = env.DISK |
+            .machine.install.wipe = true
+          ' "$dst"
+        else
+          echo "[matchbox] ERROR: yq not installed" >&2
+          return 1
+        fi
+
+        echo "  ~ set install.disk=${DISK} (wipe=true) in /assets/configs/controlplane-${host_name}.yaml"
+      }
+
+      for H in "$CONTROL_VM_HOSTNAME" "$NUC1_HOSTNAME" "$NUC2_HOSTNAME"; do
+        patch_install_disk "$H"
+      done
 
       # --- Profiles (shared per arch; templated args) ------------------------------
       talos_config_url_template() {
@@ -1196,11 +1235,11 @@ write_files:
             "talos.platform=metal",
             "console=tty0",
             "console=ttyS0,115200n8",
-            "rd.neednet=1",
-            "ip={{.IP_STATIC}}",
+            "rd.neednet=0",
+            "ip=dhcp,timeout=10",
             "slab_nomerge",
             "pti=on",
-            "talos.config=http://{{.HTTP_IP}}:${MATCHBOX_HTTP_PORT}/assets/configs/{{.CONFIG}}"
+            "talos.config=http://${ADMIN_VM_IP}:${MATCHBOX_HTTP_PORT}/assets/configs/{{.CONFIG}}"
           ]
         }
       }
@@ -1208,9 +1247,8 @@ write_files:
         echo "  + $profiles_dir/${profile_id}.json"
       }
 
-      # If BAKE_STATIC_IP=true, write an explicit per-node profile with ip=... baked in.
       write_node_profile() {
-        local host="$1" arch="$2" node_ip="$3"
+        local host="$1" arch="$2" _node_ip="$3"
         local kernel_http initrd_http
         case "$(normarch "$arch")" in
           amd64) kernel_http="$talos_http_kernel_amd64"; initrd_http="$talos_http_initrd_amd64" ;;
@@ -1218,9 +1256,7 @@ write_files:
           *) echo "[matchbox] unsupported arch '$arch'"; return 1 ;;
         esac
 
-        local ip_static; ip_static="$(compose_ip_static "$node_ip" "$GATEWAY_IP" "$NETMASK" "$host" "$DNS0" "$DNS1")"
         local profile_id="talos-${host}-$(normarch "$arch")"
-
         cat > "$profiles_dir/${profile_id}.json" <<JSON
       {
         "id": "${profile_id}",
@@ -1233,7 +1269,7 @@ write_files:
             "console=tty0",
             "console=ttyS0,115200n8",
             "rd.neednet=1",
-            "ip=${ip_static}",
+            "ip=dhcp",
             "slab_nomerge",
             "pti=on",
             "talos.config=http://${ADMIN_VM_IP}:${MATCHBOX_HTTP_PORT}/assets/configs/controlplane-${host}.yaml"
@@ -1315,7 +1351,6 @@ write_files:
       if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet matchbox 2>/dev/null; then
         systemctl reload-or-restart matchbox || true
       fi
-
 
   # -------- convenience wrapper: run all steps safely anytime --------
   - path: /usr/local/bin/cloud-apply
@@ -1639,6 +1674,9 @@ runcmd:
   - [ bash, -lc, "systemctl enable --now chrony" ]
   - [ bash, -lc, "dnsmasq --test" ]
   - [ bash, -lc, "systemctl enable --now matchbox caddy tftpd-hpa" ]
+  - [ bash, -lc, "sudo apt-get install -y yq"]
+  - [ bash, -lc, "sudo apt-get update"]
+  
 
   # Helm & Krew
   - [ bash, -lc, "/usr/local/bin/helm-install.sh || true" ]
