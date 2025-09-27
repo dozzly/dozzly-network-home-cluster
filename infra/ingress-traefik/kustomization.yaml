@@ -5,6 +5,4 @@ kind: Kustomization
 resources:
   - helmrepo.yaml       # HelmRepository (namespace: flux-system)
   - helmrelease.yaml    # HelmRelease
-  - clusterissuer.yaml  # CRs that depend on the chart
-  - issuers.yaml
 # Or whatever the file is named (values.yaml via valuesFrom is fine too)
