@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 apiVersion: kustomize.toolkit.fluxcd.io/v1
 kind: Kustomization
 metadata:
@@ -13,3 +14,10 @@ spec:
     namespace: flux-system
   wait: true
   timeout: 3m0s
+=======
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- gotk-components.yaml
+- gotk-sync.yaml
+>>>>>>> a5e19e06d6799df4a541e694cedd91f7087101aa
