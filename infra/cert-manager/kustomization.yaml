@@ -3,7 +3,6 @@ kind: Kustomization
 # If you create the namespace elsewhere, you can omit this next block
 # and make sure that namespace exists before this Kustomization runs.
 resources:
-resources:
   - helmrepo.yaml         # HelmRepository (flux-system)
   - helmrelease.yaml
   - issuers.yaml
