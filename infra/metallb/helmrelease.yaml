@@ -7,6 +7,7 @@ metadata:
 spec:
   targetNamespace: metallb-system     # chart installs here
   interval: 5m
+  timeout: 10m
   install:
     createNamespace: true
     remediation:
