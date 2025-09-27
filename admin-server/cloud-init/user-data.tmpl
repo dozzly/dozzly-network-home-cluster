@@ -934,13 +934,7 @@ write_files:
             "dhcp": false
           }
         ]},
-        {"op":"add","path":"/cluster/allowSchedulingOnControlPlanes","value":true},
-        {"op":"add","path":"/machine/systemExtensions","value":{
-          "officialExtensions":[
-            "ghcr.io/siderolabs/iscsi-tools",
-            "ghcr.io/siderolabs/nfs-utils"
-          ]
-        }}
+        {"op":"add","path":"/cluster/allowSchedulingOnControlPlanes","value":true}
       ]
       JSON
 
@@ -950,7 +944,7 @@ write_files:
           -e "s|__IFACE__|${IFACE}|g" \
           -e "s|__IP__|${IP}|g" \
           -e "s|__PFX__|${SUBNET_PREFIX}|g" \
-          -e "s|__GW__|${GATEWAY}|g" \
+          -e "s|__GW__|${GATEWAY_IP}|g" \
           "$TALOS_OUT_DIR/.patch-${HOST}.json"
 
         # Apply optional DNS patch
