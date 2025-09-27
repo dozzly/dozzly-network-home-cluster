@@ -2,19 +2,18 @@ apiVersion: helm.toolkit.fluxcd.io/v2
 kind: HelmRelease
 metadata:
   name: cilium
-metadata:
   namespace: flux-system
 spec:
+  targetNamespace: kube-system
   interval: 30m
   chart:
     spec:
       chart: cilium
-      version: 1.17.8
+      version: 1.17.8           # you can bump to 1.18.x later
       sourceRef:
         kind: HelmRepository
         name: cilium
         namespace: flux-system
-  targetNamespace: kube-system
   install:
     remediation:
       retries: 3
@@ -22,11 +21,10 @@ spec:
     remediation:
       retries: 3
   values:
-    # Set your pod/service CIDRs if you customized them in Talos
     ipam:
       mode: kubernetes
-    kubeProxyReplacement: "partial"   # or "strict" if you disable kube-proxy in Talos
-    tunnel: vxlan                     # or: tunnel: disabled + routingMode: native
+    kubeProxyReplacement: "partial"
+    tunnel: vxlan
     hubble:
       enabled: true
       metrics:
