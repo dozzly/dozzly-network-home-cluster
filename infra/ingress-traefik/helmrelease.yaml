@@ -10,6 +10,7 @@ spec:
   install:
     createNamespace: true
     crds: Create
+    disableWait: true
     remediation: { retries: 3 }
   upgrade:
     crds: CreateReplace
