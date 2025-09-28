@@ -6,7 +6,7 @@ metadata:
 spec:
   targetNamespace: traefik
   interval: 30m
-  timeout: 10m
+  timeout: 15m
   install:
     createNamespace: true
     crds: Create
@@ -41,6 +41,21 @@ spec:
     ingressClass:
       enabled: true
       isDefaultClass: true
+
+    # --- PodSecurity "restricted" friendly bits ---
+    podSecurityContext:
+      runAsNonRoot: true
+      seccompProfile:
+        type: RuntimeDefault
+      fsGroup: 65532
+
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 65532
+      readOnlyRootFilesystem: true
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop: [ "ALL" ]
 
     logs:
       general:
