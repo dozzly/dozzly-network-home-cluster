@@ -5,23 +5,31 @@ metadata:
   name: metallb
   namespace: flux-system              # CR lives here
 spec:
-  targetNamespace: metallb-system     # chart installs here
-  interval: 5m
-  timeout: 10m
+  targetNamespace: metallb-system
+  timeout: 15m
   install:
     createNamespace: true
-    remediation:
-      retries: 3
+    crds: Create
+    remediation: { retries: 3 }
   upgrade:
-    remediation:
-      retries: 3
+    crds: CreateReplace
+    remediation: { remediateLastFailure: true, retries: 3 }
   chart:
     spec:
       chart: metallb
-      version: 0.15.2
+      version: 0.14.8
       sourceRef:
         kind: HelmRepository
         name: metallb
         namespace: flux-system
-  values: {}
-
+  values:
+    frr:
+      enabled: false          # force off BGP/FRR; we’re using Layer2
+    controller:
+      enabled: true
+      replicaCount: 1
+    speaker:
+      enabled: true
+      tolerateMaster: true    # schedule on your control-plane if it’s tainted
+      nodeSelector:
+        kubernetes.io/os: linux

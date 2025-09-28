@@ -4,40 +4,54 @@ metadata:
   name: traefik
   namespace: flux-system
 spec:
+  targetNamespace: traefik
   interval: 30m
+  timeout: 10m
+  install:
+    createNamespace: true
+    crds: Create
+    remediation: { retries: 3 }
+  upgrade:
+    crds: CreateReplace
+    remediation: { remediateLastFailure: true, retries: 3 }
   chart:
     spec:
       chart: traefik
-      version: 37.1.0            # any recent stable
+      version: 28.0.0         # v3 chart series; pin something current and stable
       sourceRef:
         kind: HelmRepository
-        name: traefik
+        name: traefik         # must exist in sources/helm/
         namespace: flux-system
-  install:
-    createNamespace: true
+      interval: 30m
   values:
-    additionalArguments:
-      - --entrypoints.web.http.redirections.entrypoint.to=websecure
-      - --entrypoints.web.http.redirections.entrypoint.scheme=https
-    ingressClass:
-      enabled: true
-      isDefaultClass: true        # optional; makes traefik default
-      name: traefik
+    # Expose it via MetalLB
     service:
       type: LoadBalancer
-      loadBalancerIP: 192.168.150   # pin to your Ingress VIP
-      annotations: {}             # (optional MetalLB annotations)
-    ports:
-      web:
-        port: 80
-      websecure:
-        port: 443
-        tls:
-          enabled: true
+      spec:
+        externalTrafficPolicy: Cluster
+      # (optional) annotations to pick a specific MetalLB pool/IP can go here
+
+    # Use standard Kubernetes Ingress (no Traefik CRDs needed at first)
     providers:
       kubernetesIngress:
-        publishedService:
-          enabled: true           # needed for proper external IP in status
+        enabled: true
+      kubernetesCRD:
+        enabled: false
+
+    ingressClass:
+      enabled: true
+      isDefaultClass: true
+
     logs:
-      general: { level: INFO }
-      access: { enabled: true }
+      general:
+        level: INFO
+      access:
+        enabled: true
+
+    deployment:
+      replicas: 1
+      # schedule on your single node regardless of taints (harmless if none)
+      tolerations:
+        - operator: Exists
+      nodeSelector:
+        kubernetes.io/os: linux
