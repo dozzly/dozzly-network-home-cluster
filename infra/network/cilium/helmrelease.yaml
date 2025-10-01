@@ -1,12 +1,11 @@
+# infra/network/cilium/helmrelease.yaml
 apiVersion: helm.toolkit.fluxcd.io/v2
 kind: HelmRelease
 metadata:
-  name: cilium            # keep this if this is the HR name you committed
+  name: cilium
   namespace: flux-system
 spec:
-  # Tell Flux to manage the *existing* helm release name it adopted earlier:
-  releaseName: kube-system-cilium   # <- matches your Helm history
-
+  releaseName: cilium               # release name Helm will use
   targetNamespace: kube-system
   interval: 30m
   timeout: 10m
@@ -33,8 +32,8 @@ spec:
     mode: enabled
 
   values:
-    # Use boolean false (you currently have the string "false")
-    kubeProxyReplacement: false
+    # keep kube-proxy on for now
+    kubeProxyReplacement: "disabled"
 
     ipam:
       mode: kubernetes
@@ -42,23 +41,21 @@ spec:
     routingMode: tunnel
     tunnelProtocol: vxlan
 
-    # Talos-safe cgroup config
+    # Talos-friendly cgroup settings
     cgroup:
       autoMount:
         enabled: false
       hostRoot: /sys/fs/cgroup
 
-    # Let chart defaults set capabilities (avoid schema/runtime clashes)
+    # Let the chart set its own capabilities (good with Talos)
     securityContext:
       capabilities:
         ciliumAgent: {}
         cleanCiliumState: {}
 
-    # Single node: one operator
     operator:
       replicas: 1
 
-    # Hubble as you had it
     hubble:
       enabled: true
       relay: { enabled: true }
