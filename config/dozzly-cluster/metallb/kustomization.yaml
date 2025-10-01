@@ -2,4 +2,6 @@ apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
   - ipaddresspool.yaml
-  - l2adv.yaml
+  - l2advertisement.yaml
+  - kube-apiserver-vip-svc.yaml
+  - kube-apiserver-vip-endpoints.yaml   # or endpointslice.yaml if you switch
