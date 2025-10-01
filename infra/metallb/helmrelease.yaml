@@ -7,6 +7,7 @@ metadata:
 spec:
   targetNamespace: metallb-system
   timeout: 15m
+  interval: 5m
   install:
     createNamespace: true
     crds: Create
