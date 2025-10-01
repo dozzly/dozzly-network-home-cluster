@@ -27,6 +27,8 @@ spec:
     # IMPORTANT: For the Jetstack chart, the correct key is installCRDs (not crds.enabled)
     installCRDs: true
     # Optional niceties
+    startupapicheck:
+      enabled: false
     replicaCount: 2
     prometheus:
       enabled: false
