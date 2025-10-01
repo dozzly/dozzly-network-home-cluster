@@ -4,10 +4,9 @@ metadata:
   name: cilium
   namespace: flux-system
 spec:
-  releaseName: cilium
+  releaseName: kube-system-cilium          # must match your live release
   targetNamespace: kube-system
   interval: 30m
-  timeout: 10m
   chart:
     spec:
       chart: cilium
@@ -16,50 +15,42 @@ spec:
         kind: HelmRepository
         name: cilium
         namespace: flux-system
-      interval: 10m
   install:
-    crds: Create
     remediation:
       retries: 3
   upgrade:
-    crds: CreateReplace
     remediation:
-      remediateLastFailure: true
       retries: 3
-    resetValues: true
-  uninstall:
-    keepHistory: false
   driftDetection:
     mode: enabled
+
+  # Talos-friendly values that match what you just installed
   values:
-    # ==========================================
-    # CRITICAL: Talos Linux Specific Settings
-    # ==========================================
+    # Talk directly to your API server (prevents ClusterIP bootstrap issues)
+    k8sServiceHost: "192.168.1.155"
+    k8sServicePort: 6443
 
-    # CRITICAL: Use host network so init containers can reach API
-    # before CNI is ready (chicken-egg problem)
-    hostNetwork: true
+    # Keep kube-proxy; safer baseline
+    kubeProxyReplacement: "false"          # string avoids the chart's required() gotcha
 
-    # Disable kube-proxy replacement for now (enable later)
-    kubeProxyReplacement: "false"
+    # Standard IPAM
+    ipam:
+      mode: kubernetes
 
-    # Talos uses CRI (not dockershim)
-    containerRuntime:
-      integration: containerd
+    # Default datapath is fine; explicitly set tunnel if you prefer
+    routingMode: tunnel
 
-    # CRITICAL: Talos-specific cgroup configuration
+    # Talos cgroup settings
     cgroup:
       autoMount:
-        enabled: false  # Talos handles this
+        enabled: false
       hostRoot: /sys/fs/cgroup
 
-    # CRITICAL: Talos doesn't mount BPF filesystem by default
-    bpf:
-      autoMount:
-        enabled: false  # Talos handles this
-      root: /sys/fs/bpf
+    # Reduce moving parts while stabilizing
+    hubble:
+      enabled: false
 
-    # Talos-specific sysctls (already set by Talos)
+    # Extra caps commonly used on Talos to pass PSA/host restrictions
     securityContext:
       capabilities:
         ciliumAgent:
@@ -78,97 +69,3 @@ spec:
           - NET_ADMIN
           - SYS_ADMIN
           - SYS_RESOURCE
-
-    # ==========================================
-    # Networking Configuration
-    # ==========================================
-
-    ipam:
-      mode: kubernetes  # Use Kubernetes' native IPAM
-
-    # Use tunnel mode (VXLAN) - works best initially
-    routingMode: tunnel
-    tunnelProtocol: vxlan
-
-    # Enable IPv4, disable IPv6 (unless you need it)
-    ipv4:
-      enabled: true
-    ipv6:
-      enabled: false
-
-    # ==========================================
-    # API Server Configuration
-    # ==========================================
-
-    # CRITICAL: Use host network to reach API during init
-    # This bypasses the Service ClusterIP which doesn't work yet
-    k8sServiceHost: "192.168.1.155"
-    k8sServicePort: "6443"
-
-    # ==========================================
-    # Operator Configuration
-    # ==========================================
-
-    operator:
-      skipCRDCreation: false
-      replicas: 1  # Start with 1, can increase to 2 later
-      rollOutPods: true
-      prometheus:
-        enabled: true
-        serviceMonitor:
-          enabled: false  # Enable if you have Prometheus Operator
-
-    # ==========================================
-    # Hubble (Observability)
-    # ==========================================
-
-    hubble:
-      enabled: true
-      metrics:
-        enabled:
-          - dns:query
-          - drop
-          - tcp
-          - flow
-          - icmp
-          - http
-      relay:
-        enabled: true
-        replicas: 1
-      ui:
-        enabled: true
-        replicas: 1
-
-    # ==========================================
-    # Monitoring
-    # ==========================================
-
-    prometheus:
-      enabled: true
-      serviceMonitor:
-        enabled: false  # Enable when you have Prometheus Operator
-
-    # ==========================================
-    # Additional Settings
-    # ==========================================
-
-    # Enable health checks
-    endpointHealthChecking:
-      enabled: true
-
-    # Bandwidth management
-    bandwidthManager:
-      enabled: false  # Can enable later for better performance
-
-    # Pod restart on policy enforcement
-    policyEnforcementMode: "default"
-
-    # Enable host firewall (optional, for added security)
-    hostFirewall:
-      enabled: false  # Can enable later
-
-    # L7 proxy settings
-    l7Proxy: true
-
-    # Enable local redirect policy (optional)
-    localRedirectPolicy: false
