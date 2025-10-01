@@ -43,7 +43,7 @@ spec:
     hostNetwork: true
 
     # Disable kube-proxy replacement for now (enable later)
-    kubeProxyReplacement: false
+    kubeProxyReplacement: "false"
 
     # Talos uses CRI (not dockershim)
     containerRuntime:
