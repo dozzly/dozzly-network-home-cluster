@@ -47,12 +47,6 @@ spec:
         enabled: false
       hostRoot: /sys/fs/cgroup
 
-    # Let the chart set its own capabilities (good with Talos)
-    securityContext:
-      capabilities:
-        ciliumAgent: {}
-        cleanCiliumState: {}
-
     operator:
       replicas: 1
 
