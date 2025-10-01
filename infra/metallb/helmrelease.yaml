@@ -33,7 +33,7 @@ spec:
         value: "6443"
     controller:
       enabled: true
-      replicaCount: 1
+      replicaCount: 2
     speaker:
       enabled: true
       tolerateMaster: true    # schedule on your control-plane if it’s tainted
