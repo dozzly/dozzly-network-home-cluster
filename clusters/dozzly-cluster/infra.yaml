@@ -14,11 +14,11 @@ spec:
     name: flux-system
     namespace: flux-system
   path: ./infra
-  healthChecks:
-    - apiVersion: apps/v1
-      kind: Deployment
-      name: cert-manager
-      namespace: cert-manager
+#  healthChecks:
+#    - apiVersion: apps/v1
+#      kind: Deployment
+#      name: cert-manager
+#      namespace: cert-manager
 #    - apiVersion: apps/v1
 #      kind: Deployment
 #      name: traefik
