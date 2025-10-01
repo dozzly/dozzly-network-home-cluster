@@ -7,5 +7,5 @@ commonLabels:
   app.kubernetes.io/name: kube-apiserver-vip
 
 resources:
-  - kube-apiserver-vip-svc.yaml
+  - kube-apiserver-vip.yaml
   - kube-apiserver-vip-endpoints.yaml   # or endpointslice.yaml if you switch
