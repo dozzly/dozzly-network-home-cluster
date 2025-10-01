@@ -26,7 +26,8 @@ spec:
     remediation:
       remediateLastFailure: true
       retries: 3
-  uninstall:
+    resetValues: true
+uninstall:
     keepHistory: false
   driftDetection:
     mode: enabled
