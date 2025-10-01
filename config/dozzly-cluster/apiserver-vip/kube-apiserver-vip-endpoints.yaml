@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: kube-apiserver-vip
+  namespace: kube-system
+spec:
+  type: LoadBalancer
+  loadBalancerIP: 192.168.1.160        # <-- choose an IP from your MetalLB pool
+  externalTrafficPolicy: Local         # only advertise VIP on nodes that have an endpoint
+  ports:
+    - name: https
+      port: 6443
+      targetPort: 6443
+  # NOTE: no selector on purpose (we'll define Endpoints below)

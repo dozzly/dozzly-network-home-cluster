@@ -9,4 +9,4 @@ commonLabels:
 resources:
   - namespace.yaml
   - ipaddresspool.yaml
-  - l2advertisement.yaml
+  - l2adv.yaml
