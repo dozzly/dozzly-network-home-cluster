@@ -1,19 +1,14 @@
-apiVersion: discovery.k8s.io/v1
-kind: EndpointSlice
+apiVersion: v1
+kind: Service
 metadata:
   name: kube-apiserver-vip
   namespace: kube-system
-  labels:
-    kubernetes.io/service-name: kube-apiserver-vip
-addressType: IPv4
-ports:
-  - name: https
-    protocol: TCP
-    port: 6443
-endpoints:
-  - addresses:
-      - 192.168.1.155
-  - addresses:
-      - 192.168.1.154
-  - addresses:
-      - 192.168.1.153
+spec:
+  type: LoadBalancer
+  loadBalancerIP: 192.168.1.160
+  externalTrafficPolicy: Cluster
+  ports:
+    - name: https
+      port: 6443
+      targetPort: 6443
+  # NOTE: no selector on purpose

@@ -8,4 +8,4 @@ commonLabels:
 
 resources:
   - kube-apiserver-vip.yaml
-  - kube-apiserver-vip-endpoints.yaml   # or endpointslice.yaml if you switch
+  - kube-apiserver-vip-endpointslice.yaml  # or endpointslice.yaml if you switch
