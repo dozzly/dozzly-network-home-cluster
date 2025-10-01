@@ -33,6 +33,13 @@ spec:
     # Keep kube-proxy; safer baseline
     kubeProxyReplacement: "false"          # string avoids the chart's required() gotcha
 
+    externalIPs:
+      enabled: true
+    hostServices:
+      enabled: true
+    nodePort:
+      enabled: true
+
     # Standard IPAM
     ipam:
       mode: kubernetes
