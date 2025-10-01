@@ -9,7 +9,7 @@ spec:
   prune: true
   sourceRef:
     kind: GitRepository
-    name: dozzly-network-home-cluster     # <-- replace with your GitRepository name
+    name: flux-system    # <-- replace with your GitRepository name
     namespace: flux-system
   targetNamespace: kube-system
   wait: true
