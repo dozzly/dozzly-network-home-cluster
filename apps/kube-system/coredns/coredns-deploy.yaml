@@ -8,7 +8,7 @@ spec:
   chart:
     spec:
       chart: coredns
-      version: 1.x.x                 # pick a stable version available in your repo
+      version: 1.43.3                 # pick a stable version available in your repo
       sourceRef:
         kind: HelmRepository
         name: bitnami                # or your chosen repo
