@@ -1,131 +1,78 @@
-apiVersion: apps/v1
-kind: Deployment
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
 metadata:
-  annotations:
-    deployment.kubernetes.io/revision: "30"
-  creationTimestamp: "2025-09-27T11:30:08Z"
-  generation: 33
-  labels:
-    k8s-app: kube-dns
-    kubernetes.io/name: CoreDNS
   name: coredns
   namespace: kube-system
-  resourceVersion: "328689"
-  uid: 14e64001-90b0-483b-8f47-571d01508568
 spec:
-  progressDeadlineSeconds: 600
-  replicas: 3
-  revisionHistoryLimit: 10
-  selector:
-    matchLabels:
-      k8s-app: kube-dns
-  strategy:
-    rollingUpdate:
-      maxSurge: 25%
-      maxUnavailable: 1
-    type: RollingUpdate
-  template:
-    metadata:
-      annotations:
-        kubectl.kubernetes.io/restartedAt: "2025-10-01T18:43:36Z"
-      labels:
-        k8s-app: kube-dns
+  interval: 5m
+  chart:
     spec:
-      affinity:
-        podAntiAffinity:
-          preferredDuringSchedulingIgnoredDuringExecution:
-          - podAffinityTerm:
-              labelSelector:
-                matchLabels:
-                  k8s-app: kube-dns
-              topologyKey: kubernetes.io/hostname
-            weight: 100
-      containers:
-      - args:
-        - -conf
-        - /etc/coredns/Corefile
-        env:
-        - name: GOMEMLIMIT
-          value: 161MiB
-        image: registry.k8s.io/coredns/coredns:v1.12.3
-        imagePullPolicy: IfNotPresent
-        livenessProbe:
-          failureThreshold: 5
-          httpGet:
-            path: /health
-            port: 8080
-            scheme: HTTP
-          initialDelaySeconds: 60
-          periodSeconds: 10
-          successThreshold: 1
-          timeoutSeconds: 5
+      chart: coredns
+      version: 1.28.0 # or your repo’s latest; keep stable
+      sourceRef:
+        kind: HelmRepository
         name: coredns
-        ports:
-        - containerPort: 53
-          name: dns
-          protocol: UDP
-        - containerPort: 53
-          name: dns-tcp
-          protocol: TCP
-        - containerPort: 9153
-          name: metrics
-          protocol: TCP
-        readinessProbe:
-          failureThreshold: 3
-          httpGet:
-            path: /ready
-            port: 8181
-            scheme: HTTP
-          periodSeconds: 10
-          successThreshold: 1
-          timeoutSeconds: 1
-        resources:
-          limits:
-            cpu: 200m
-            memory: 170Mi
-          requests:
-            cpu: 100m
-            memory: 70Mi
-        securityContext:
-          allowPrivilegeEscalation: false
-          capabilities:
-            add:
-            - NET_BIND_SERVICE
-            drop:
-            - ALL
-          readOnlyRootFilesystem: true
-        terminationMessagePath: /dev/termination-log
-        terminationMessagePolicy: File
-        volumeMounts:
-        - mountPath: /etc/coredns
-          name: config-volume
-          readOnly: true
-      dnsPolicy: ClusterFirst
-      nodeSelector:
-        kubernetes.io/os: linux
-      priorityClassName: system-cluster-critical
-      restartPolicy: Always
-      schedulerName: default-scheduler
-      securityContext: {}
-      serviceAccount: coredns
-      serviceAccountName: coredns
-      terminationGracePeriodSeconds: 30
-      tolerations:
-      - effect: NoSchedule
-        key: role
-        operator: Equal
-        value: admin
-      - effect: NoSchedule
-        key: node-role.kubernetes.io/control-plane
-        operator: Exists
-      - effect: NoSchedule
-        key: node-role.kubernetes.io/master
-        operator: Exists
-      volumes:
-      - configMap:
-          defaultMode: 420
-          items:
-          - key: Corefile
-            path: Corefile
-          name: coredns
-        name: config-volume
+        namespace: flux-system
+  values:
+    replicaCount: 2
+
+    # IMPORTANT: do NOT use host networking
+    hostNetwork: false
+    # Let pods use normal ClusterFirst DNS
+    dnsPolicy: ClusterFirst
+
+    service:
+      name: kube-dns
+      type: ClusterIP
+      # preserve the clusterIP; otherwise Helm may try to change it
+      clusterIP: ${KUBE_DNS_IP}
+
+    # If your chart manages the Corefile, uncomment the block below and remove the ConfigMap from step 3:
+    # servers:
+    #   - zones:
+    #       - zone: .
+    #     port: 53
+    #     plugins:
+    #       - name: errors
+    #       - name: health
+    #         parameters: { lameduck: 5s }
+    #       - name: ready
+    #       - name: kubernetes
+    #         parameters: cluster.local in-addr.arpa ip6.arpa
+    #         configBlock: |
+    #           pods insecure
+    #           fallthrough in-addr.arpa ip6.arpa
+    #           ttl 30
+    #       - name: prometheus
+    #         parameters: :9153
+    #       - name: forward
+    #         parameters: . /etc/resolv.conf
+    #       - name: cache
+    #         parameters: 30
+    #       - name: loop
+    #       - name: reload
+    #       - name: loadbalance
+
+    resources:
+      requests:
+        cpu: 100m
+        memory: 70Mi
+      limits:
+        memory: 170Mi
+
+    tolerations:
+      - key: "node-role.kubernetes.io/control-plane"
+        operator: "Exists"
+        effect: "NoSchedule"
+
+    affinity:
+      podAntiAffinity:
+        preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                  - key: k8s-app
+                    operator: In
+                    values: ["kube-dns"]
+              topologyKey: kubernetes.io/hostname

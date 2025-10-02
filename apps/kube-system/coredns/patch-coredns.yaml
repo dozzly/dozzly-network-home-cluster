@@ -7,7 +7,22 @@ spec:
   replicas: 3
   template:
     spec:
-      # Allow CoreDNS to run on all control-plane nodes (incl. warner’s custom taint)
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: coredns
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+              add:
+                - NET_BIND_SERVICE
       tolerations:
         - key: role
           operator: Equal
@@ -19,8 +34,6 @@ spec:
         - key: node-role.kubernetes.io/master
           operator: Exists
           effect: NoSchedule
-
-      # Prefer one pod per node (soft; won’t block scheduling if a node is down)
       affinity:
         podAntiAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
@@ -30,7 +43,5 @@ spec:
                 labelSelector:
                   matchLabels:
                     k8s-app: kube-dns
-
-      # Make sure no old nodeSelector pins it away from warner
+      # Remove any prior arch pin so we can schedule on warner (arm64) too.
       nodeSelector: {}
-      # If you *want* to pin only to gee+goldstone, s
