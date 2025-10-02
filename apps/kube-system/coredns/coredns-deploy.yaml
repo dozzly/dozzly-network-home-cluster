@@ -8,71 +8,45 @@ spec:
   chart:
     spec:
       chart: coredns
-      version: 1.28.0 # or your repo’s latest; keep stable
+      version: 1.x.x                 # pick a stable version available in your repo
       sourceRef:
         kind: HelmRepository
-        name: coredns
+        name: bitnami                # or your chosen repo
         namespace: flux-system
   values:
     replicaCount: 2
-
-    # IMPORTANT: do NOT use host networking
     hostNetwork: false
-    # Let pods use normal ClusterFirst DNS
-    dnsPolicy: ClusterFirst
+    dnsPolicy: Default
+    image:
+      repository: registry.k8s.io/coredns/coredns
+      tag: v1.11.1
 
     service:
       name: kube-dns
       type: ClusterIP
-      # preserve the clusterIP; otherwise Helm may try to change it
-      clusterIP: ${KUBE_DNS_IP}
+      clusterIP: 10.96.0.10          # keep your current ClusterIP
 
-    # If your chart manages the Corefile, uncomment the block below and remove the ConfigMap from step 3:
-    # servers:
-    #   - zones:
-    #       - zone: .
-    #     port: 53
-    #     plugins:
-    #       - name: errors
-    #       - name: health
-    #         parameters: { lameduck: 5s }
-    #       - name: ready
-    #       - name: kubernetes
-    #         parameters: cluster.local in-addr.arpa ip6.arpa
-    #         configBlock: |
-    #           pods insecure
-    #           fallthrough in-addr.arpa ip6.arpa
-    #           ttl 30
-    #       - name: prometheus
-    #         parameters: :9153
-    #       - name: forward
-    #         parameters: . /etc/resolv.conf
-    #       - name: cache
-    #         parameters: 30
-    #       - name: loop
-    #       - name: reload
-    #       - name: loadbalance
-
-    resources:
-      requests:
-        cpu: 100m
-        memory: 70Mi
-      limits:
-        memory: 170Mi
-
-    tolerations:
-      - key: "node-role.kubernetes.io/control-plane"
-        operator: "Exists"
-        effect: "NoSchedule"
-
-    affinity:
-      podAntiAffinity:
-        preferredDuringSchedulingIgnoredDuringExecution:
-          - weight: 100
-            podAffinityTerm:
-              labelSelector:
-                matchExpressions:
-                  - key: k8s-app
-                    operator: In
-                    values: ["kube-dns"]
-              topologyKey: kubernetes.io/hostname
+    # Corefile managed by values — adjust to match the working one
+    servers:
+      - zones: [ { zone: "." } ]
+        port: 53
+        plugins:
+          - name: errors
+          - name: health
+            parameters: { lameduck: 5s }
+          - name: ready
+          - name: kubernetes
+            parameters: cluster.local in-addr.arpa ip6.arpa
+            configBlock: |
+              pods insecure
+              fallthrough in-addr.arpa ip6.arpa
+              ttl 30
+          - name: prometheus
+            parameters: :9153
+          - name: forward
+            parameters: . 1.1.1.1 1.0.0.1 9.9.9.9
+          - name: cache
+            parameters: 30
+          - name: loop
+          - name: reload
+          - name: loadbalance
