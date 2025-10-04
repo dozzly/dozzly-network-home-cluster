@@ -1737,6 +1737,10 @@ final_message: |
    - kubectl label node atherton node-role.do/arm-admin=true kubernetes.io/arch=arm64 --overwrite
    - kubectl label node goldstone node-role.do/amd-work=true kubernetes.io/arch=amd64 --overwrite
    - kubectl label node gee       node-role.do/amd-work=true kubernetes.io/arch=amd64 --overwrite
+   - Make sure to add these options to the profiles if it's a fresh boot of taloslinux on the nucs. Firstly wipe the system, then do talos.config.ovveride=true
+     # "talos.config.override=true",
+     #  "talos.experimental.wipe=system"
+
 final_message: |
   Admin server ready 🚀
 
