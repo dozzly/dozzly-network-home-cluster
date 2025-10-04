@@ -3,6 +3,7 @@ kind: Kustomization
 resources:
   - sources.yaml
   - infra.yaml
+  - dozzly-cluster-config.yaml
   - config.yaml
   - policies.yaml
   - apps.yaml

@@ -4,3 +4,4 @@ resources:
   - network/cilium
   - cert-manager
   - coredns
+  - metallb

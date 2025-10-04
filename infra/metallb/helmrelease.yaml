@@ -28,7 +28,7 @@ spec:
       enabled: false          # force off BGP/FRR; we’re using Layer2
     extraEnvVars:
       - name: KUBERNETES_SERVICE_HOST
-        value: "192.168.1.155"
+        value: "192.168.1.153"
       - name: KUBERNETES_SERVICE_PORT
         value: "6443"
     controller:
