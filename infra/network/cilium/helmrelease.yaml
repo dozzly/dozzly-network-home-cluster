@@ -27,8 +27,8 @@ spec:
   # Talos-friendly values that match what you just installed
   values:
     # Talk directly to your API server (prevents ClusterIP bootstrap issues)
-    k8sServiceHost: "192.168.1.153"
-    k8sServicePort: 6443
+#    k8sServiceHost: "192.168.1.153"
+#    k8sServicePort: 6443
 
     # Keep kube-proxy; safer baseline
     kubeProxyReplacement: "false"          # string avoids the chart's required() gotcha
